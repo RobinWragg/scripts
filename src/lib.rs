@@ -3,8 +3,6 @@
 fn common_prefix(names: &[&str]) -> String {
     let name_a = names[0];
 
-    let g: i32 = 4;
-
     let mut prefix_len = name_a.len();
     for name_b in names {
         while prefix_len > 0 && !name_b.starts_with(&name_a[..prefix_len]) {
