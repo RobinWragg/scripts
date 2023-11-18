@@ -1,8 +1,9 @@
+use std::env;
 use std::fs;
 
 fn main() {
-    let paths = fs::read_dir("./").unwrap();
-    for path in paths {
-        println!("{}", path.unwrap().path().to_str().unwrap());
+    let args: Vec<String> = env::args().collect();
+    for path in &args[1..] {
+        println!("{}", path);
     }
 }
