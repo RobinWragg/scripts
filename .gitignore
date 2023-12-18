@@ -1,3 +1,4 @@
 /target
 /Cargo.lock
 .DS_Store
+/python/yt_download_archive.txt
