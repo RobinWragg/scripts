@@ -21,6 +21,7 @@ channels = [
     'tested',
     'AbroadinJapan',
     'HealthyGamerGG',
+    'kylehill',
     'mcolville',
     'NASA',
     'smartereveryday',
