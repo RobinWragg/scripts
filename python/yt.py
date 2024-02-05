@@ -1,11 +1,9 @@
-import requests
+import grequests
 import re
 import sys
 import os
 import json
 import webbrowser
-
-# testing....
 
 initialize = False
 
@@ -13,7 +11,6 @@ abspath = os.path.abspath(__file__)
 dname = os.path.dirname(abspath)
 no_show_list_path = os.path.join(dname, 'yt_no_show_list.txt')
 
-# downloads_path = str(Path.home() / "Downloads")
 os.chdir(dname)
 
 channels = [
@@ -40,7 +37,6 @@ channels = [
     'SpaceX',
     'kaguiro',
     'AdamNeely',
-    'bbcearth',
     'pbsspacetime',
     'Radiohead',
     'SteveMould',
@@ -61,18 +57,29 @@ channels = [
     'TheGlassCannon'
 ]
 
-def get_channel_json(channel):
-    channel_url = 'https://www.youtube.com/@' + channel + '/videos'
-    html = requests.get(channel_url).content.decode('utf-8')
+def get_response_json(response):
+    html = response.content.decode('utf-8')
     j = re.search(r'var ytInitialData = (.*?);</script>', html)
     j = j[1]
     j = json.loads(j)
     return j
 
-all_videos = []
+channel_requests = []
 
 for channel in channels:
-    j = get_channel_json(channel)
+    channel_url = 'https://www.youtube.com/@' + channel + '/videos'
+    req = grequests.get(channel_url)
+    channel_requests.append(req)
+
+channel_responses = grequests.map(channel_requests)
+
+all_videos = []
+
+for c in range(len(channels)):
+    channel = channels[c]
+    response = channel_responses[c]
+
+    j = get_response_json(response)
     try:
         tabs = j['contents']['twoColumnBrowseResultsRenderer']['tabs']
         videos = tabs[1]['tabRenderer']['content']['richGridRenderer']['contents']
