@@ -5,8 +5,6 @@ import os
 import json
 import webbrowser
 
-# testing
-
 initialize = False
 
 abspath = os.path.abspath(__file__)
