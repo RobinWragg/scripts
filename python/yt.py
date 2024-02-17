@@ -9,7 +9,7 @@ initialize = False
 
 abspath = os.path.abspath(__file__)
 dname = os.path.dirname(abspath)
-no_show_list_path = os.path.join(dname, 'yt_no_show_list.txt')
+no_show_list_path = os.path.join(dname, '..', 'yt_no_show_list.txt')
 
 os.chdir(dname)
 
@@ -32,6 +32,7 @@ channels = [
     'TomScottGo',
     'kanamenaito',
     'jameshoffmann',
+    'BPSspace',
     'ICHIKEN1',
     'EverydayAstronaut',
     'SpaceX',

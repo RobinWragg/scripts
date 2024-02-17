@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // rwtodo is it possible to return &str with lifetime specifiers?
 // rwtodo how does this handle 日本語 etc?
 fn common_prefix(names: &[&str]) -> String {
