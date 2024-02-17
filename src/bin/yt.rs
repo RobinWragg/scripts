@@ -1,6 +1,8 @@
 use curl::easy::Easy;
+use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
+use std::time::Instant;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
@@ -98,49 +100,51 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
 }
 
 fn main() {
+    let timer = Instant::now();
+
     let channel_ids = [
         "SSkorkowsky",
         "tested",
         "AbroadinJapan",
-        // "HealthyGamerGG",
-        // "kylehill",
-        // "mcolville",
-        // "NASA",
-        // "smartereveryday",
-        // "TechnologyConnections",
-        // "GameGrumps",
-        // "Wintergatan",
-        // "TheGrumps",
-        // "veritasium",
-        // "MarcusHouse",
-        // "scottmanley",
-        // "TomScottGo",
-        // "kanamenaito",
-        // "jameshoffmann",
-        // "BPSspace",
-        // "ICHIKEN1",
-        // "EverydayAstronaut",
-        // "SpaceX",
-        // "kaguiro",
-        // "AdamNeely",
-        // "pbsspacetime",
-        // "Radiohead",
-        // "SteveMould",
-        // "strandbeestfilm",
-        // "gendesign4714",
-        // "Einzelganger",
-        // "StuffMadeHere",
-        // "theklainc.5724",
-        // "StarTalk",
-        // "CosmicPerspective",
-        // "StrangeParts",
-        // "helloMCDM",
-        // "_noisecode",
-        // "Onomappu",
-        // "SciShow",
-        // "JonTronShow",
-        // "Mystery_Quest",
-        // "TheGlassCannon",
+        "HealthyGamerGG",
+        "kylehill",
+        "mcolville",
+        "NASA",
+        "smartereveryday",
+        "TechnologyConnections",
+        "GameGrumps",
+        "Wintergatan",
+        "TheGrumps",
+        "veritasium",
+        "MarcusHouse",
+        "scottmanley",
+        "TomScottGo",
+        "kanamenaito",
+        "jameshoffmann",
+        "BPSspace",
+        "ICHIKEN1",
+        "EverydayAstronaut",
+        "SpaceX",
+        "kaguiro",
+        "AdamNeely",
+        "pbsspacetime",
+        "Radiohead",
+        "SteveMould",
+        "strandbeestfilm",
+        "gendesign4714",
+        "Einzelganger",
+        "StuffMadeHere",
+        "theklainc.5724",
+        "StarTalk",
+        "CosmicPerspective",
+        "StrangeParts",
+        "helloMCDM",
+        "_noisecode",
+        "Onomappu",
+        "SciShow",
+        "JonTronShow",
+        "Mystery_Quest",
+        "TheGlassCannon",
     ];
 
     struct Channel {
@@ -157,10 +161,9 @@ fn main() {
         });
     }
 
-    for channel in &mut channels {
-        println!("Checking {}", channel.id);
+    channels.par_iter_mut().for_each(|channel| {
         get_channel_videos(&channel.id, &mut channel.videos);
-    }
+    });
 
     let mut all_videos: Vec<Video> = vec![];
 
@@ -169,6 +172,7 @@ fn main() {
     }
     all_videos.sort_by_key(|v| v.seconds_ago);
 
+    println!("Elapsed: {:.2?}", timer.elapsed());
     for video in all_videos {
         println!(
             "{}\t{} {}",
