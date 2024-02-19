@@ -2,7 +2,7 @@ use curl::easy::Easy;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
-use std::time::Instant;
+use std::{error::Error, io::Result, time::Instant};
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
@@ -99,8 +99,19 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
     }
 }
 
+fn get_no_show_list() -> String {
+    let exe_path = std::env::current_exe().unwrap();
+    let dir = exe_path.parent().unwrap();
+    let dir = dir.parent().unwrap();
+    let dir = dir.parent().unwrap();
+    let now_show_path = dir.join("yt_no_show_list.txt");
+    std::fs::read_to_string(now_show_path).unwrap()
+}
+
 fn main() {
     let timer = Instant::now();
+
+    let loaded_no_shows = get_no_show_list();
 
     let channel_ids = [
         "SSkorkowsky",
