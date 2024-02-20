@@ -2,7 +2,6 @@ use curl::easy::Easy;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
-use std::{error::Error, io::Result, time::Instant};
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
@@ -43,6 +42,7 @@ fn json_from_page(page: &str) -> String {
         .to_string()
 }
 
+#[derive(Clone)]
 struct Video {
     channel_id: String,
     video_id: String,
@@ -53,12 +53,14 @@ struct Video {
 
 fn get_video(channel_id: &str, value: &Value) -> Option<Video> {
     if *value != Value::Null {
-        let recency = value["publishedTimeText"]["simpleText"].to_string();
+        let recency = value["publishedTimeText"]["simpleText"]
+            .as_str()?
+            .to_string();
         let seconds_ago = parse_recency(&recency);
         return Some(Video {
             channel_id: channel_id.to_string(),
-            video_id: value["videoId"].to_string(),
-            title: value["title"]["runs"][0]["text"].to_string(),
+            video_id: value["videoId"].as_str()?.to_string(),
+            title: value["title"]["runs"][0]["text"].as_str()?.to_string(),
             recency,
             seconds_ago,
         });
@@ -109,8 +111,7 @@ fn get_no_show_list() -> String {
 }
 
 fn main() {
-    let timer = Instant::now();
-
+    println!("Getting no-shows...");
     let loaded_no_shows = get_no_show_list();
 
     let channel_ids = [
@@ -123,6 +124,7 @@ fn main() {
         "NASA",
         "smartereveryday",
         "TechnologyConnections",
+        "corkboardsandcuriosities",
         "GameGrumps",
         "Wintergatan",
         "TheGrumps",
@@ -165,6 +167,7 @@ fn main() {
 
     let mut channels: Vec<Channel> = vec![];
 
+    println!("Reticulating splines...");
     for id in channel_ids {
         channels.push(Channel {
             id: id.to_string(),
@@ -172,22 +175,41 @@ fn main() {
         });
     }
 
+    println!("Curling channels...");
     channels.par_iter_mut().for_each(|channel| {
         get_channel_videos(&channel.id, &mut channel.videos);
     });
 
     let mut all_videos: Vec<Video> = vec![];
 
+    println!("Sorting videos...");
     for channel in &mut channels {
         all_videos.append(&mut channel.videos);
     }
     all_videos.sort_by_key(|v| v.seconds_ago);
 
-    println!("Elapsed: {:.2?}", timer.elapsed());
-    for video in all_videos {
+    let mut unwatched_videos: Vec<Video> = vec![];
+
+    println!("Finding unwatched videos...");
+    for video in &all_videos {
+        if !loaded_no_shows.contains(&video.video_id) {
+            unwatched_videos.push(video.clone());
+        }
+    }
+
+    let print_recency = false;
+
+    for i in 0..unwatched_videos.len() {
+        if print_recency
+            && i > 0
+            && unwatched_videos[i].seconds_ago != unwatched_videos[i - 1].seconds_ago
+        {
+            println!("\n{}", unwatched_videos[i].recency);
+        }
+
         println!(
-            "{}\t{} {}",
-            video.channel_id, video.recency, video.seconds_ago
+            "{} {}\t{}",
+            i, unwatched_videos[i].channel_id, unwatched_videos[i].title
         );
     }
 }
