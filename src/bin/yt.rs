@@ -1,7 +1,10 @@
 use curl::easy::Easy;
+use open;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
+use std::io::{stdin, stdout, Write};
+use std::path::PathBuf;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
@@ -101,18 +104,18 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
     }
 }
 
-fn get_no_show_list() -> String {
+fn get_no_show_list_path() -> PathBuf {
     let exe_path = std::env::current_exe().unwrap();
     let dir = exe_path.parent().unwrap();
     let dir = dir.parent().unwrap();
     let dir = dir.parent().unwrap();
-    let now_show_path = dir.join("yt_no_show_list.txt");
-    std::fs::read_to_string(now_show_path).unwrap()
+    dir.join("yt_no_show_list.txt")
 }
 
 fn main() {
     println!("Getting no-shows...");
-    let loaded_no_shows = get_no_show_list();
+    let no_shows_path = get_no_show_list_path();
+    let loaded_no_shows = std::fs::read_to_string(&no_shows_path).unwrap();
 
     let channel_ids = [
         "SSkorkowsky",
@@ -143,6 +146,7 @@ fn main() {
         "pbsspacetime",
         "Radiohead",
         "SteveMould",
+        "iamjoshuadavies",
         "strandbeestfilm",
         "gendesign4714",
         "Einzelganger",
@@ -191,8 +195,12 @@ fn main() {
     let mut unwatched_videos: Vec<Video> = vec![];
 
     println!("Finding unwatched videos...");
+    let mut new_no_shows = String::new();
     for video in &all_videos {
-        if !loaded_no_shows.contains(&video.video_id) {
+        if loaded_no_shows.contains(&video.video_id) {
+            new_no_shows += &video.video_id;
+            new_no_shows += "\n";
+        } else {
             unwatched_videos.push(video.clone());
         }
     }
@@ -212,6 +220,35 @@ fn main() {
             i, unwatched_videos[i].channel_id, unwatched_videos[i].title
         );
     }
+
+    print!(">> ");
+    let _ = stdout().flush();
+
+    let mut user_input = String::new();
+    stdin().read_line(&mut user_input).expect("...wat?");
+
+    let inputs = user_input.split(" ");
+
+    for i in inputs {
+        let re = Regex::new(r"x(\d+)").unwrap();
+        if let Some(captures) = re.captures(i) {
+            if let Ok(index) = captures[1].parse::<usize>() {
+                println!("Removing {}", index);
+                new_no_shows += &unwatched_videos[index].video_id;
+                new_no_shows += "\n";
+            } else {
+                panic!();
+            }
+        } else if let Ok(index) = i.trim().parse::<usize>() {
+            new_no_shows += &unwatched_videos[index].video_id;
+            new_no_shows += "\n";
+            let url =
+                "https://www.youtube.com/watch?v=".to_owned() + &unwatched_videos[index].video_id;
+            open::that(url).unwrap();
+        }
+    }
+
+    std::fs::write(no_shows_path, new_no_shows).unwrap();
 }
 
 #[cfg(test)]
