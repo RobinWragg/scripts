@@ -150,7 +150,6 @@ fn main() {
         "iamjoshuadavies",
         "strandbeestfilm",
         "gendesign4714",
-        "Einzelganger",
         "StuffMadeHere",
         "theklainc.5724",
         "StarTalk",
