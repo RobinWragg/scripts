@@ -149,6 +149,7 @@ fn main() {
         "iamjoshuadavies",
         "strandbeestfilm",
         "gendesign4714",
+        "TheAlexandrian",
         "StuffMadeHere",
         "theklainc.5724",
         "cijapanese",
