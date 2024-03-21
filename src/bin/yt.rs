@@ -86,7 +86,7 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
                 Ok(data.len())
             })
             .unwrap();
-        transfer.perform().unwrap();
+        transfer.perform().unwrap(); // note, this failed once.
     }
     assert_eq!(easy.response_code().unwrap(), 200);
     let page = std::str::from_utf8(&dst).unwrap();
@@ -131,7 +131,6 @@ fn main() {
         "Wintergatan",
         "TheGrumps",
         "veritasium",
-        "MarcusHouse",
         "scottmanley",
         "TomScottGo",
         "kanamenaito",
