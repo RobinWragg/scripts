@@ -152,7 +152,6 @@ fn main() {
         "StuffMadeHere",
         "theklainc.5724",
         "cijapanese",
-        "StarTalk",
         "CosmicPerspective",
         "StrangeParts",
         "helloMCDM",
