@@ -156,6 +156,7 @@ fn main() {
         "StrangeParts",
         "helloMCDM",
         "_noisecode",
+        "kasso_0318",
         "Onomappu",
         "JonTronShow",
         "NihongoDekita",
