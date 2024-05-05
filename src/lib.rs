@@ -1,9 +1,7 @@
-#![allow(dead_code)]
-
 // rwtodo is it possible to return &str with lifetime specifiers?
 // rwtodo how does this handle 日本語 etc?
-fn common_prefix(names: &[&str]) -> String {
-    let name_a = names[0];
+pub fn common_prefix(names: &[String]) -> String {
+    let name_a = &names[0];
 
     let mut prefix_len = name_a.len();
     for name_b in names {
@@ -15,8 +13,8 @@ fn common_prefix(names: &[&str]) -> String {
     name_a[..prefix_len].to_string()
 }
 
-fn common_suffix(names: &[&str]) -> String {
-    let name_a = names[0];
+pub fn common_suffix(names: &[String]) -> String {
+    let name_a = &names[0];
 
     let mut suffix_start = 0;
     for name_b in names {
