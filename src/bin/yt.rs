@@ -158,6 +158,7 @@ fn main() {
         "_noisecode",
         "kasso_0318",
         "Onomappu",
+        "chronovaengineering",
         "JonTronShow",
         "NihongoDekita",
         "Mystery_Quest",
