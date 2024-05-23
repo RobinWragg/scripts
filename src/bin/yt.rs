@@ -158,13 +158,13 @@ fn main() {
         "_noisecode",
         "kasso_0318",
         "Onomappu",
-        "chronovaengineering",
         "JonTronShow",
         "NihongoDekita",
         "Mystery_Quest",
         "MarkRober",
         "robscallon",
         "TheGlassCannon",
+        "jblow888",
     ];
 
     struct Channel {
