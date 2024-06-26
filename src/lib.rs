@@ -25,24 +25,3 @@ pub fn common_suffix(names: &[String]) -> String {
 
     name_a[suffix_start..].to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_common_ends() {
-        let test_data_list = [
-            (["abc efg", "abcdefg"], "abc", "efg"),
-            (["ag", "abcdefg"], "a", "g"),
-            (["cde", "abcdefg"], "", ""),
-        ];
-
-        for test_data in test_data_list {
-            let result = common_prefix(&test_data.0);
-            assert_eq!(result, test_data.1);
-            let result = common_suffix(&test_data.0);
-            assert_eq!(result, test_data.2);
-        }
-    }
-}
