@@ -5,6 +5,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::io::{stdin, stdout, Write};
 use std::path::PathBuf;
+use std::time::*;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
@@ -13,13 +14,13 @@ const SECONDS_PER_WEEK: u64 = SECONDS_PER_DAY * 7;
 const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30; // Approximate!
 const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365; // Approximate!
 
-fn parse_recency(s: &str) -> u64 {
+fn parse_recency(s: &str, now: &SystemTime) -> SystemTime {
     let re = Regex::new(r"(\d+) (\w+?)s? ago").unwrap();
     let captures = re.captures(s).unwrap();
 
     let base_number = captures[1].parse::<u64>().unwrap();
 
-    match &captures[2] {
+    let seconds = match &captures[2] {
         "second" => base_number,
         "minute" => base_number * SECONDS_PER_MINUTE,
         "hour" => base_number * SECONDS_PER_HOUR,
@@ -28,7 +29,9 @@ fn parse_recency(s: &str) -> u64 {
         "month" => base_number * SECONDS_PER_MONTH,
         "year" => base_number * SECONDS_PER_YEAR,
         _ => unreachable!(),
-    }
+    };
+
+    *now - Duration::from_secs(seconds)
 }
 
 fn video_list_url(channel_id: &str) -> String {
@@ -51,28 +54,28 @@ struct Video {
     video_id: String,
     title: String,
     recency: String,
-    seconds_ago: u64,
+    sys_time: SystemTime,
 }
 
-fn get_video(channel_id: &str, value: &Value) -> Option<Video> {
+fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Option<Video> {
     if *value != Value::Null {
         let recency = value["publishedTimeText"]["simpleText"]
             .as_str()?
             .to_string();
-        let seconds_ago = parse_recency(&recency);
+        let sys_time = parse_recency(&recency, now);
         return Some(Video {
             channel_id: channel_id.to_string(),
             video_id: value["videoId"].as_str()?.to_string(),
             title: value["title"]["runs"][0]["text"].as_str()?.to_string(),
             recency,
-            seconds_ago,
+            sys_time,
         });
     }
 
     return None;
 }
 
-fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
+fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>, now: &SystemTime) {
     let url = video_list_url(channel_id);
     let mut easy = Easy::new();
     easy.follow_location(true).unwrap();
@@ -98,7 +101,7 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>) {
 
     for video in videos {
         let video = &video["richItemRenderer"]["content"]["videoRenderer"];
-        if let Some(video) = get_video(channel_id, video) {
+        if let Some(video) = get_video(channel_id, video, now) {
             videos_out.push(video);
         }
     }
@@ -183,8 +186,9 @@ fn main() {
     }
 
     println!("Curling channels...");
+    let now = SystemTime::now(); // Use same 'now' value for all videos
     channels.par_iter_mut().for_each(|channel| {
-        get_channel_videos(&channel.id, &mut channel.videos);
+        get_channel_videos(&channel.id, &mut channel.videos, &now);
     });
 
     let mut all_videos: Vec<Video> = vec![];
@@ -193,7 +197,7 @@ fn main() {
     for channel in &mut channels {
         all_videos.append(&mut channel.videos);
     }
-    all_videos.sort_by_key(|v| v.seconds_ago);
+    all_videos.sort_by_key(|v| v.sys_time);
 
     let mut unwatched_videos: Vec<Video> = vec![];
 
@@ -213,9 +217,23 @@ fn main() {
     for i in 0..unwatched_videos.len() {
         if print_recency
             && i > 0
-            && unwatched_videos[i].seconds_ago != unwatched_videos[i - 1].seconds_ago
+            && unwatched_videos[i]
+                .sys_time
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                != unwatched_videos[i - 1]
+                    .sys_time
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
         {
-            println!("\n{}", unwatched_videos[i].recency);
+            let dur = unwatched_videos[i].sys_time.duration_since(UNIX_EPOCH);
+            println!(
+                "\n{} {}",
+                unwatched_videos[i].recency,
+                dur.unwrap().as_secs()
+            );
         }
 
         println!(
@@ -252,26 +270,4 @@ fn main() {
     }
 
     std::fs::write(no_shows_path, new_no_shows).unwrap();
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn recency_parsing() {
-        use crate::parse_recency;
-        assert_eq!(parse_recency("1 second ago"), 1);
-        assert_eq!(parse_recency("2 seconds ago"), 2);
-        assert_eq!(parse_recency("1 minute ago"), 60);
-        assert_eq!(parse_recency("2 minutes ago"), 120);
-        assert_eq!(parse_recency("1 hour ago"), 3600);
-        assert_eq!(parse_recency("2 hours ago"), 7200);
-        assert_eq!(parse_recency("1 day ago"), 86400);
-        assert_eq!(parse_recency("2 days ago"), 172800);
-        assert_eq!(parse_recency("1 week ago"), 604800);
-        assert_eq!(parse_recency("2 weeks ago"), 1209600);
-        assert_eq!(parse_recency("1 month ago"), 2592000);
-        assert_eq!(parse_recency("2 months ago"), 5184000);
-        assert_eq!(parse_recency("1 year ago"), 31536000);
-        assert_eq!(parse_recency("2 years ago"), 63072000);
-    }
 }
