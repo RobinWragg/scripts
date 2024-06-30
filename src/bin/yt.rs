@@ -44,20 +44,23 @@ fn json_from_page(page: &str) -> Option<String> {
 }
 
 #[derive(Clone)]
-struct Video {
-    channel_id: String,
+struct VideoDetails {
     video_id: String,
+    channel_id: String,
     title: String,
-    recency: String,
-    sys_time: SystemTime,
+    date: SystemTime,
 }
 
-fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Result<Video, Box<dyn Error>> {
+fn get_video(
+    channel_id: &str,
+    value: &Value,
+    now: &SystemTime,
+) -> Result<VideoDetails, Box<dyn Error>> {
     let recency = value["publishedTimeText"]["simpleText"]
         .as_str()
         .ok_or("Couldn't get simpleText str")?
         .to_string();
-    let sys_time = parse_recency(&recency, now)?;
+    let date = parse_recency(&recency, now)?;
     let video_id = value["videoId"]
         .as_str()
         .ok_or("Couldn't get videoId str")?
@@ -67,16 +70,18 @@ fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Result<Video,
         .ok_or("Couldn't get runs str")?
         .to_string();
 
-    return Ok(Video {
+    return Ok(VideoDetails {
         channel_id: channel_id.to_string(),
         video_id,
         title,
-        recency,
-        sys_time,
+        date,
     });
 }
 
-fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Result<Vec<Video>, Box<dyn Error>> {
+fn get_channel_videos(
+    channel_id: &str,
+    now: &SystemTime,
+) -> Result<Vec<VideoDetails>, Box<dyn Error>> {
     let url = video_list_url(channel_id);
     let mut easy_curl = curl::easy::Easy::new();
     easy_curl.follow_location(true)?;
@@ -186,7 +191,7 @@ fn main() {
 
     struct Channel {
         id: String,
-        videos: Vec<Video>,
+        videos: Vec<VideoDetails>,
     }
 
     let mut channels: Vec<Channel> = vec![];
@@ -206,15 +211,15 @@ fn main() {
             get_channel_videos(&channel.id, &now).expect("failed to get channel videos");
     });
 
-    let mut all_videos: Vec<Video> = vec![];
+    let mut all_videos: Vec<VideoDetails> = vec![];
 
     println!("Sorting videos...");
     for channel in &mut channels {
         all_videos.append(&mut channel.videos);
     }
-    all_videos.sort_by_key(|v| v.sys_time);
+    all_videos.sort_by_key(|v| v.date);
 
-    let mut unwatched_videos: Vec<Video> = vec![];
+    let mut unwatched_videos: Vec<VideoDetails> = vec![];
 
     println!("Finding unwatched videos...");
     let mut new_no_shows = String::new();
@@ -227,29 +232,7 @@ fn main() {
         }
     }
 
-    let print_recency = false;
-
     for i in 0..unwatched_videos.len() {
-        if print_recency
-            && i > 0
-            && unwatched_videos[i]
-                .sys_time
-                .duration_since(UNIX_EPOCH)
-                .expect("tried to get duration since epoch")
-                .as_secs()
-                != unwatched_videos[i - 1]
-                    .sys_time
-                    .duration_since(UNIX_EPOCH)
-                    .expect("tried to get duration since epoch")
-                    .as_secs()
-        {
-            let dur = unwatched_videos[i]
-                .sys_time
-                .duration_since(UNIX_EPOCH)
-                .expect("tried to get duration since epoch");
-            println!("\n{} {}", unwatched_videos[i].recency, dur.as_secs());
-        }
-
         println!(
             "{} {}\t{}",
             i, unwatched_videos[i].channel_id, unwatched_videos[i].title
