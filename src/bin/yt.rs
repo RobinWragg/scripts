@@ -70,7 +70,7 @@ fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Option<Video>
     return None;
 }
 
-fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>, now: &SystemTime) {
+fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Vec<Video> {
     let url = video_list_url(channel_id);
     let mut easy = Easy::new();
     easy.follow_location(true).unwrap();
@@ -88,20 +88,24 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>, now: &Syste
     }
     assert_eq!(easy.response_code().unwrap(), 200);
     let page = std::str::from_utf8(&dst).unwrap();
+
     if let Some(json) = json_from_page(page) {
         let serde_value: Value = serde_json::from_str(&json).unwrap();
         let tabs = &serde_value["contents"]["twoColumnBrowseResultsRenderer"]["tabs"];
         let videos = &tabs[1]["tabRenderer"]["content"]["richGridRenderer"]["contents"];
         let videos = videos.as_array().unwrap();
 
+        let mut videos_out = vec![];
         for video in videos {
             let video = &video["richItemRenderer"]["content"]["videoRenderer"];
             if let Some(video) = get_video(channel_id, video, now) {
                 videos_out.push(video);
             }
         }
+        videos_out
     } else {
         println!("Couldn't get json from page: {}", url);
+        vec![]
     }
 }
 
@@ -186,7 +190,7 @@ fn main() {
     println!("Curling channels...");
     let now = SystemTime::now(); // Use same 'now' value for all videos
     channels.par_iter_mut().for_each(|channel| {
-        get_channel_videos(&channel.id, &mut channel.videos, &now);
+        channel.videos = get_channel_videos(&channel.id, &now);
     });
 
     let mut all_videos: Vec<Video> = vec![];
