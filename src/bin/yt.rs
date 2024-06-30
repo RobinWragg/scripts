@@ -38,14 +38,9 @@ fn video_list_url(channel_id: &str) -> String {
     "https://www.youtube.com/@".to_owned() + channel_id + "/videos"
 }
 
-fn json_from_page(page: &str) -> String {
-    let re = Regex::new(r"var ytInitialData = (.*?);</script>").unwrap();
-    re.captures(page)
-        .unwrap()
-        .get(1)
-        .unwrap()
-        .as_str()
-        .to_string()
+fn json_from_page(page: &str) -> Option<String> {
+    let re = Regex::new(r"var ytInitialData = (.*?);</script>").ok()?;
+    Some(re.captures(page)?.get(1)?.as_str().to_string())
 }
 
 #[derive(Clone)]
@@ -93,17 +88,20 @@ fn get_channel_videos(channel_id: &str, videos_out: &mut Vec<Video>, now: &Syste
     }
     assert_eq!(easy.response_code().unwrap(), 200);
     let page = std::str::from_utf8(&dst).unwrap();
-    let json = json_from_page(page);
-    let serde_value: Value = serde_json::from_str(&json).unwrap();
-    let tabs = &serde_value["contents"]["twoColumnBrowseResultsRenderer"]["tabs"];
-    let videos = &tabs[1]["tabRenderer"]["content"]["richGridRenderer"]["contents"];
-    let videos = videos.as_array().unwrap();
+    if let Some(json) = json_from_page(page) {
+        let serde_value: Value = serde_json::from_str(&json).unwrap();
+        let tabs = &serde_value["contents"]["twoColumnBrowseResultsRenderer"]["tabs"];
+        let videos = &tabs[1]["tabRenderer"]["content"]["richGridRenderer"]["contents"];
+        let videos = videos.as_array().unwrap();
 
-    for video in videos {
-        let video = &video["richItemRenderer"]["content"]["videoRenderer"];
-        if let Some(video) = get_video(channel_id, video, now) {
-            videos_out.push(video);
+        for video in videos {
+            let video = &video["richItemRenderer"]["content"]["videoRenderer"];
+            if let Some(video) = get_video(channel_id, video, now) {
+                videos_out.push(video);
+            }
         }
+    } else {
+        println!("Couldn't get json from page: {}", url);
     }
 }
 
