@@ -7,18 +7,18 @@ use std::io::{stdin, stdout, Write};
 use std::path::PathBuf;
 use std::time::*;
 
-const SECONDS_PER_MINUTE: u64 = 60;
-const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
-const SECONDS_PER_DAY: u64 = SECONDS_PER_HOUR * 24;
-const SECONDS_PER_WEEK: u64 = SECONDS_PER_DAY * 7;
-const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30; // Approximate!
-const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365; // Approximate!
-
 fn parse_recency(s: &str, now: &SystemTime) -> Result<SystemTime, Box<dyn Error>> {
     let re = Regex::new(r"(\d+) (\w+?)s? ago")?;
     let captures = re.captures(s).ok_or("captures() call failed")?;
 
     let base_number = captures[1].parse::<u64>()?;
+
+    const SECONDS_PER_MINUTE: u64 = 60;
+    const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
+    const SECONDS_PER_DAY: u64 = SECONDS_PER_HOUR * 24;
+    const SECONDS_PER_WEEK: u64 = SECONDS_PER_DAY * 7;
+    const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30; // Approximate!
+    const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365; // Approximate!
 
     let seconds = match &captures[2] {
         "second" => base_number,
