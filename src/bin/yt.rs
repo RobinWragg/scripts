@@ -1,6 +1,5 @@
-use curl::easy::Easy;
+use curl;
 use open;
-use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
 use std::error::Error;
@@ -77,30 +76,30 @@ fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Result<Video,
     });
 }
 
-fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Vec<Video> {
+fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Result<Vec<Video>, Box<dyn Error>> {
     let url = video_list_url(channel_id);
-    let mut easy = Easy::new();
-    easy.follow_location(true).unwrap();
+    let mut easy_curl = curl::easy::Easy::new();
+    easy_curl.follow_location(true)?;
     let mut dst = Vec::new();
     {
-        easy.url(&url).unwrap();
-        let mut transfer = easy.transfer();
-        transfer
-            .write_function(|data| {
-                dst.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap(); // note, this failed once.
+        easy_curl.url(&url)?;
+        let mut transfer = easy_curl.transfer();
+        transfer.write_function(|data| {
+            dst.extend_from_slice(data);
+            Ok(data.len())
+        })?;
+        transfer.perform()?; // note, this failed once.
     }
-    assert_eq!(easy.response_code().unwrap(), 200);
-    let page = std::str::from_utf8(&dst).unwrap();
+    assert_eq!(easy_curl.response_code(), Ok(200));
+    let page = std::str::from_utf8(&dst)?;
 
     if let Some(json) = json_from_page(page) {
-        let serde_value: Value = serde_json::from_str(&json).unwrap();
+        let serde_value: Value = serde_json::from_str(&json)?;
         let tabs = &serde_value["contents"]["twoColumnBrowseResultsRenderer"]["tabs"];
         let videos = &tabs[1]["tabRenderer"]["content"]["richGridRenderer"]["contents"];
-        let videos = videos.as_array().unwrap();
+        let videos = videos
+            .as_array()
+            .ok_or("Couldn't convert videos to array")?;
 
         let mut videos_out = vec![];
         for video_value in videos {
@@ -114,10 +113,10 @@ fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Vec<Video> {
                 };
             }
         }
-        videos_out
+        Ok(videos_out)
     } else {
         println!("Couldn't get json from page: {}", url);
-        vec![]
+        Ok(vec![])
     }
 }
 
@@ -201,8 +200,9 @@ fn main() {
 
     println!("Curling channels...");
     let now = SystemTime::now(); // Use same 'now' value for all videos
-    channels.par_iter_mut().for_each(|channel| {
-        channel.videos = get_channel_videos(&channel.id, &now);
+    channels.iter_mut().for_each(|channel| {
+        channel.videos =
+            get_channel_videos(&channel.id, &now).expect("failed to get channel videos");
     });
 
     let mut all_videos: Vec<Video> = vec![];
@@ -234,20 +234,19 @@ fn main() {
             && unwatched_videos[i]
                 .sys_time
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .expect("tried to get duration since epoch")
                 .as_secs()
                 != unwatched_videos[i - 1]
                     .sys_time
                     .duration_since(UNIX_EPOCH)
-                    .unwrap()
+                    .expect("tried to get duration since epoch")
                     .as_secs()
         {
-            let dur = unwatched_videos[i].sys_time.duration_since(UNIX_EPOCH);
-            println!(
-                "\n{} {}",
-                unwatched_videos[i].recency,
-                dur.unwrap().as_secs()
-            );
+            let dur = unwatched_videos[i]
+                .sys_time
+                .duration_since(UNIX_EPOCH)
+                .expect("tried to get duration since epoch");
+            println!("\n{} {}", unwatched_videos[i].recency, dur.as_secs());
         }
 
         println!(
@@ -260,12 +259,14 @@ fn main() {
     let _ = stdout().flush();
 
     let mut user_input = String::new();
-    stdin().read_line(&mut user_input).expect("...wat?");
+    stdin()
+        .read_line(&mut user_input)
+        .expect("user input failed");
 
     let inputs = user_input.split(" ");
 
     for i in inputs {
-        let re = Regex::new(r"x(\d+)").unwrap();
+        let re = Regex::new(r"x(\d+)").expect("tried to create regex");
         if let Some(captures) = re.captures(i) {
             if let Ok(index) = captures[1].parse::<usize>() {
                 println!("Removing {}", index);
@@ -279,9 +280,9 @@ fn main() {
             new_no_shows += "\n";
             let url =
                 "https://www.youtube.com/watch?v=".to_owned() + &unwatched_videos[index].video_id;
-            open::that(url).unwrap();
+            open::that(url).expect("tried to open URL in browser");
         }
     }
 
-    std::fs::write(no_shows_path, new_no_shows).unwrap();
+    std::fs::write(no_shows_path, new_no_shows).expect("tried to write to no-shows file");
 }
