@@ -120,18 +120,19 @@ fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Result<Vec<Video>, 
     }
 }
 
-fn get_no_show_list_path() -> PathBuf {
-    let exe_path = std::env::current_exe().unwrap();
-    let dir = exe_path.parent().unwrap();
-    let dir = dir.parent().unwrap();
-    let dir = dir.parent().unwrap();
-    dir.join("yt_no_show_list.txt")
+fn get_no_show_list_path() -> Result<PathBuf, Box<dyn Error>> {
+    let exe_path = std::env::current_exe()?;
+    let dir = exe_path.parent().ok_or("Couldn't get parent")?;
+    let dir = dir.parent().ok_or("Couldn't get parent")?;
+    let dir = dir.parent().ok_or("Couldn't get parent")?;
+    Ok(dir.join("yt_no_show_list.txt"))
 }
 
 fn main() {
     println!("Getting no-shows...");
-    let no_shows_path = get_no_show_list_path();
-    let loaded_no_shows = std::fs::read_to_string(&no_shows_path).unwrap();
+    let no_shows_path = get_no_show_list_path().expect("Tried to get no-shows path");
+    let loaded_no_shows =
+        std::fs::read_to_string(&no_shows_path).expect("Tried to read no-shows file");
 
     let channel_ids = [
         "SSkorkowsky",
