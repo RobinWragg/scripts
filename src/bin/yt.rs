@@ -3,6 +3,7 @@ use open;
 use rayon::prelude::*;
 use regex::Regex;
 use serde_json::Value;
+use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use std::path::PathBuf;
 use std::time::*;
@@ -14,11 +15,11 @@ const SECONDS_PER_WEEK: u64 = SECONDS_PER_DAY * 7;
 const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30; // Approximate!
 const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365; // Approximate!
 
-fn parse_recency(s: &str, now: &SystemTime) -> SystemTime {
-    let re = Regex::new(r"(\d+) (\w+?)s? ago").unwrap();
-    let captures = re.captures(s).unwrap();
+fn parse_recency(s: &str, now: &SystemTime) -> Result<SystemTime, Box<dyn Error>> {
+    let re = Regex::new(r"(\d+) (\w+?)s? ago")?;
+    let captures = re.captures(s).ok_or("captures() call failed")?;
 
-    let base_number = captures[1].parse::<u64>().unwrap();
+    let base_number = captures[1].parse::<u64>()?;
 
     let seconds = match &captures[2] {
         "second" => base_number,
@@ -31,7 +32,7 @@ fn parse_recency(s: &str, now: &SystemTime) -> SystemTime {
         _ => unreachable!(),
     };
 
-    *now - Duration::from_secs(seconds)
+    Ok(*now - Duration::from_secs(seconds))
 }
 
 fn video_list_url(channel_id: &str) -> String {
@@ -52,22 +53,28 @@ struct Video {
     sys_time: SystemTime,
 }
 
-fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Option<Video> {
-    if *value != Value::Null {
-        let recency = value["publishedTimeText"]["simpleText"]
-            .as_str()?
-            .to_string();
-        let sys_time = parse_recency(&recency, now);
-        return Some(Video {
-            channel_id: channel_id.to_string(),
-            video_id: value["videoId"].as_str()?.to_string(),
-            title: value["title"]["runs"][0]["text"].as_str()?.to_string(),
-            recency,
-            sys_time,
-        });
-    }
+fn get_video(channel_id: &str, value: &Value, now: &SystemTime) -> Result<Video, Box<dyn Error>> {
+    let recency = value["publishedTimeText"]["simpleText"]
+        .as_str()
+        .ok_or("Couldn't get simpleText str")?
+        .to_string();
+    let sys_time = parse_recency(&recency, now)?;
+    let video_id = value["videoId"]
+        .as_str()
+        .ok_or("Couldn't get videoId str")?
+        .to_string();
+    let title = value["title"]["runs"][0]["text"]
+        .as_str()
+        .ok_or("Couldn't get runs str")?
+        .to_string();
 
-    return None;
+    return Ok(Video {
+        channel_id: channel_id.to_string(),
+        video_id,
+        title,
+        recency,
+        sys_time,
+    });
 }
 
 fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Vec<Video> {
@@ -96,10 +103,15 @@ fn get_channel_videos(channel_id: &str, now: &SystemTime) -> Vec<Video> {
         let videos = videos.as_array().unwrap();
 
         let mut videos_out = vec![];
-        for video in videos {
-            let video = &video["richItemRenderer"]["content"]["videoRenderer"];
-            if let Some(video) = get_video(channel_id, video, now) {
-                videos_out.push(video);
+        for video_value in videos {
+            let video_value = &video_value["richItemRenderer"]["content"]["videoRenderer"];
+
+            // Some nulls are expected.
+            if !video_value.is_null() {
+                match get_video(channel_id, video_value, now) {
+                    Ok(video) => videos_out.push(video),
+                    Err(e) => println!("Failed to get video: {} because: {}", video_value, e),
+                };
             }
         }
         videos_out
