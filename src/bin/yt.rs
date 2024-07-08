@@ -187,6 +187,8 @@ fn main() {
         "robscallon",
         "TheGlassCannon",
         "jblow888",
+        "CharlesCornellStudios",
+        "simon_dentremont",
     ];
 
     struct Channel {
