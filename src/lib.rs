@@ -1,3 +1,24 @@
+use std::fs;
+use std::path::PathBuf;
+
+pub type BaseResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+pub fn get_all_files(root_path: &PathBuf) -> BaseResult<Vec<PathBuf>> {
+    let paths = fs::read_dir(root_path)?;
+    let mut file_paths = vec![];
+
+    for dir_entry in paths {
+        let path = dir_entry?.path();
+        if path.is_dir() {
+            file_paths.append(&mut get_all_files(&path)?);
+        } else {
+            file_paths.push(path);
+        }
+    }
+
+    Ok(file_paths)
+}
+
 // rwtodo is it possible to return &str with lifetime specifiers?
 // rwtodo how does this handle 日本語 etc?
 pub fn common_prefix(names: &[String]) -> String {
