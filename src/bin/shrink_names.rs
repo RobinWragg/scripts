@@ -58,14 +58,12 @@ fn main() {
 
     for path in &mut paths {
         {
-            let mut original_buf = path::PathBuf::new();
-            original_buf.push(&path.0);
+            let mut original_buf = path::PathBuf::from(&path.0);
             let name_with_ext = path.1.clone() + "." + &path.2;
             original_buf.push(name_with_ext.clone());
 
             let shrunk_name = &path.1[prefix.len()..(path.1.len() - suffix.len())];
-            let mut shrunk_buf = path::PathBuf::new();
-            shrunk_buf.push(&path.0);
+            let mut shrunk_buf = path::PathBuf::from(&path.0);
             let name_with_ext = shrunk_name.to_owned() + "." + &path.2;
             shrunk_buf.push(name_with_ext.clone());
 
