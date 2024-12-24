@@ -1,4 +1,19 @@
 import MeCab
+import requests
+
+def get_jlpt_level_from_jisho(word):
+    url = f"https://jisho.org/api/v1/search/words?keyword={word}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        if data['data']:
+            for entry in data['data']:
+                jlpt = entry.get('jlpt', [])
+                if jlpt:
+                    return jlpt
+        return "No JLPT level found"
+    else:
+        return f"Error: {response.status_code}"
 
 with open('phrases.txt', 'r', encoding='utf-8') as f:
     phrases = f.readlines()
@@ -35,21 +50,12 @@ for text in phrases:
             else:
                 words[dictionary_form] = 1
 
-changed = True
-while changed:
-    changed = False
-    for w in words.keys():
-        if words[w] < 5:
-            del words[w]
-            changed = True
-            break
-
-print('count:', len(words))
-    
-def print_sorted_words(words):
-    sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
-    for word, count in sorted_words:
-        print(f'{word}: {count}')
-
-print_sorted_words(words)
+print('Most common 500 words:')
+sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
+word_count = 0
+for word, frequency in sorted_words:
+    print(f'{word}: {frequency}')
+    word_count += 1
+    if word_count >= 500:
+        break
 
