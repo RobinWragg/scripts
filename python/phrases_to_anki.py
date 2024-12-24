@@ -1,5 +1,10 @@
 import MeCab
 import requests
+import sys
+
+if __name__ != '__main__':
+    print('This script is not meant to be imported')
+    sys.exit()
 
 def get_jlpt_level_from_jisho(word):
     url = f"https://jisho.org/api/v1/search/words?keyword={word}"
@@ -50,7 +55,7 @@ for text in phrases:
             else:
                 words[dictionary_form] = 1
 
-print('Most common 500 words:')
+print('Most common 500 nouns, verbs and adjectives:')
 sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
 word_count = 0
 for word, frequency in sorted_words:
@@ -58,4 +63,3 @@ for word, frequency in sorted_words:
     word_count += 1
     if word_count >= 500:
         break
-
