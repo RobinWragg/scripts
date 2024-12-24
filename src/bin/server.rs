@@ -1,5 +1,6 @@
 /*
-nc bmo.local 8080
+client test: nc bmo.local 8080
+docker pat: dckr_pat_kFLQHIDpOjZY7WNtdG3glDrJaaM
 */
 
 use std::io::{Read, Write};
@@ -31,9 +32,9 @@ fn handle_client(mut stream: TcpStream) {
 
 fn main() -> std::io::Result<()> {
     // Bind the server to the specified address and port
-    let listener = TcpListener::bind("0.0.0.0:8080")?;
+    let listener = TcpListener::bind("0.0.0.0:3000")?;
 
-    println!("Server listening on port 8080");
+    println!("Server listening on port 3000");
 
     // Loop to accept incoming connections
     for stream in listener.incoming() {
