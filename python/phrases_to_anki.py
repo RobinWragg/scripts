@@ -1,12 +1,16 @@
-deck_name = 'K-On Vocabulary'
-furigana = False
-target_word_count = 500
+deck_name = 'K-On 1'
+target_word_count = 10
+subtitle_file = 'k-on-1.ass'
+
+# TODO: add example sentences
+# TODO: add kanji, kana, definition, example instead of question, answer
 
 import MeCab
 import requests
 import sys
 import genanki
 import random
+import re
 
 if __name__ != '__main__':
     print('This script is not meant to be imported')
@@ -48,8 +52,17 @@ def katakana_to_hiragana(text):
     # Convert each character
     return ''.join(convert_dict.get(char, char) for char in text)
 
-with open('phrases.txt', 'r', encoding='utf-8') as f:
-    phrases = f.readlines()
+with open(subtitle_file, encoding="utf8") as f:
+    subtitles = f.read()
+
+regex = re.compile(r'Dialogue:.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,(.*)')
+braces = re.compile(r'{.*?}')
+found = regex.findall(subtitles)
+
+phrases = []
+for f in found:
+    f = re.sub(braces, '', f)
+    phrases += f
 
 words = {}
 
@@ -101,16 +114,16 @@ for text in phrases:
                 words[dictionary_form] = 1
 
 model = genanki.Model(
-    random.randrange(1 << 30, 1 << 31),
-    'Simple Model',
+    83746180,
+    'Japanese Words',
     fields=[
         {'name': 'Question'},
         {'name': 'Answer'},
     ],
     templates=[
         {
-        'name': 'Card 1',
-        'qfmt': '<span style="font-size: 50px;">{{Question}}</span>',
+        'name': 'Japanese Word Card',
+        'qfmt': '<span style="font-size: 60px;">{{Question}}</span>',
         'afmt': '{{FrontSide}}<hr id="answer"><span style="font-size: 30px;">{{Answer}}</span>',
         },
     ], css='.card {text-align: center;}')
@@ -127,15 +140,9 @@ for word, frequency in sorted_words:
     if definition == None:
         continue
     
-    note = None
-    if furigana:
-        note = genanki.Note(
+    note = genanki.Note(
             model=model,
             fields=[word + '<br/><span style="font-size: 16px;">' + hiragana_forms[word] + '</span>', definition])
-    else:
-        note = genanki.Note(
-            model=model,
-            fields=[word, hiragana_forms[word] + '<br/>' + definition])
     
     deck.add_note(note)
     word_count += 1
