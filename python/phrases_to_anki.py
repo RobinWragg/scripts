@@ -1,9 +1,6 @@
 deck_name = 'K-On 1'
-target_word_count = 10
+target_word_count = 1000
 subtitle_file = 'k-on-1.ass'
-
-# TODO: add example sentences
-# TODO: add kanji, kana, definition, example instead of question, answer
 
 import MeCab
 import requests
@@ -22,8 +19,14 @@ def get_japanese_definition(word):
     if response.status_code == 200:
         data = response.json()
         if data["data"]:
+            count = 0
+            meanings = ''
             for meaning in data["data"][0]["senses"]:
-                return '; '.join(meaning["english_definitions"])
+                count += 1
+                meanings += str(count) + ': ' + '; '.join(meaning["english_definitions"]) + '<br/>'
+                if count >= 2:
+                    break
+            return meanings
     print('No definition found for ' + word)
     return None
 
@@ -40,6 +43,9 @@ def get_jlpt_level_from_jisho(word):
         return "No JLPT level found"
     else:
         return f"Error: {response.status_code}"
+
+def is_roman_only(sentence):
+    return all(ord(char) < 128 for char in sentence)
 
 def katakana_to_hiragana(text):
     # Create conversion table
@@ -62,7 +68,7 @@ found = regex.findall(subtitles)
 phrases = []
 for f in found:
     f = re.sub(braces, '', f)
-    phrases += f
+    phrases.append(f)
 
 words = {}
 
@@ -82,10 +88,11 @@ others = 'その他' # そのた
 
 parts_of_speech = {}
 hiragana_forms = {}
+sentences = {}
 
-for text in phrases:
+for phrase in phrases:
     tagger = MeCab.Tagger()
-    tokens = tagger.parse(text).splitlines()[:-1]
+    tokens = tagger.parse(phrase).splitlines()[:-1]
     for token in tokens:
         token_parts = token.split('\t')
         katakana = token_parts[2]
@@ -93,10 +100,11 @@ for text in phrases:
         dictionary_form = token_parts[3].split('-')[0]
         token_part_of_speech = token_parts[4]
 
-        if dictionary_form == '為る':
+        if dictionary_form == '為る' or is_roman_only(dictionary_form):
             continue
         
         hiragana_forms[dictionary_form] = hiragana
+        sentences[dictionary_form] = '「' + phrase + '」'
 
         processed_part_of_speech = None
         if token_part_of_speech.startswith(noun):
@@ -117,16 +125,18 @@ model = genanki.Model(
     83746180,
     'Japanese Words',
     fields=[
-        {'name': 'Question'},
-        {'name': 'Answer'},
+        {'name': 'Kanji'},
+        {'name': 'Kana'},
+        {'name': 'Definition'},
+        {'name': 'Sentence'},
     ],
     templates=[
         {
         'name': 'Japanese Word Card',
-        'qfmt': '<span style="font-size: 60px;">{{Question}}</span>',
-        'afmt': '{{FrontSide}}<hr id="answer"><span style="font-size: 30px;">{{Answer}}</span>',
+        'qfmt': '<span style="font-size: 60px;">{{Kanji}}</span><br/>{{Kana}}',
+        'afmt': '{{FrontSide}}<br/><div style="text-align: left;">{{Definition}}</div><br/>{{Sentence}}</span>',
         },
-    ], css='.card {text-align: center;}')
+    ], css='.card {text-align: center; font-size: 16px;}')
 
 deck = genanki.Deck(
   random.randrange(1 << 30, 1 << 31),
@@ -135,14 +145,22 @@ deck = genanki.Deck(
 sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
 word_count = 0
 for word, frequency in sorted_words:
-    print(f'{word}: {frequency}')
-    definition = get_japanese_definition(word)
+    print(str(frequency) + ' occurrences of ' + word)
+    try_count = 0
+    definition = None
+    while definition == None and try_count < 3:
+        try_count += 1
+        definition = get_japanese_definition(word)
     if definition == None:
         continue
+
+    definition = get_japanese_definition(word)
     
+    fields = [word, hiragana_forms[word], definition, sentences[word]]
+    print(fields)
     note = genanki.Note(
             model=model,
-            fields=[word + '<br/><span style="font-size: 16px;">' + hiragana_forms[word] + '</span>', definition])
+            fields=fields)
     
     deck.add_note(note)
     word_count += 1
