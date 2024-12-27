@@ -1,6 +1,6 @@
-deck_name = 'Sakura 1'
+deck_name = 'Boku 1'
 target_word_count = 1000
-subtitle_file = 'sakura-1.srt'
+subtitle_file = 'boku-1.ass'
 
 import MeCab
 import requests
@@ -111,7 +111,7 @@ auxiliary = '助動詞' # じょどうし
 others = 'その他' # そのた
 
 parts_of_speech = {}
-hiragana_forms = {}
+hiragana_sets = {}
 sentence_sets = {}
 
 for phrase in phrases:
@@ -135,7 +135,9 @@ for phrase in phrases:
             sentence_sets[dictionary_form] = set()
         sentence_sets[dictionary_form].add('「' + phrase + '」')
 
-        hiragana_forms[dictionary_form] = hiragana
+        if not dictionary_form in hiragana_sets:
+            hiragana_sets[dictionary_form] = set()
+        hiragana_sets[dictionary_form].add(hiragana)
         parts_of_speech[dictionary_form] = token_part_of_speech
 
         if not dictionary_form in words:
@@ -183,7 +185,7 @@ for word, frequency in sorted_words:
     for sentence in sentence_sets[word]:
         sentences += sentence + '<br/>'
     
-    fields = [word, hiragana_forms[word], definition, sentences]
+    fields = [word, '、'.join(hiragana_sets[word]), definition, sentences]
     print('\n'.join(fields))
     note = genanki.Note(
         model=model,
