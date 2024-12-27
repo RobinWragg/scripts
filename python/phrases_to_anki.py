@@ -88,7 +88,7 @@ others = 'その他' # そのた
 
 parts_of_speech = {}
 hiragana_forms = {}
-sentences = {}
+sentence_sets = {}
 
 for phrase in phrases:
     tagger = MeCab.Tagger()
@@ -104,15 +104,18 @@ for phrase in phrases:
             continue
         
         hiragana_forms[dictionary_form] = hiragana
-        sentences[dictionary_form] = '「' + phrase + '」'
+
+        if not dictionary_form in sentence_sets:
+            sentence_sets[dictionary_form] = set()
+        sentence_sets[dictionary_form].add('「' + phrase + '」')
 
         processed_part_of_speech = None
         if token_part_of_speech.startswith(noun):
-            processed_part_of_speech = 'noun'
+            processed_part_of_speech = noun
         elif token_part_of_speech.startswith(verb):
-            processed_part_of_speech = 'verb'
+            processed_part_of_speech = verb
         elif token_part_of_speech.startswith(adjective):
-            processed_part_of_speech = 'adjective'
+            processed_part_of_speech = adjective
         
         if processed_part_of_speech != None:
             if dictionary_form in words:
@@ -128,15 +131,15 @@ model = genanki.Model(
         {'name': 'Kanji'},
         {'name': 'Kana'},
         {'name': 'Definition'},
-        {'name': 'Sentence'},
+        {'name': 'Sentences'},
     ],
     templates=[
         {
         'name': 'Japanese Word Card',
         'qfmt': '<span style="font-size: 60px;">{{Kanji}}</span><br/>{{Kana}}',
-        'afmt': '{{FrontSide}}<br/><div style="text-align: left;">{{Definition}}</div><br/>{{Sentence}}</span>',
+        'afmt': '{{FrontSide}}<br/><div style="text-align: left;">{{Definition}}</div><br/>{{Sentences}}',
         },
-    ], css='.card {text-align: center; font-size: 16px;}')
+    ], css='.card {text-align: center; font-size: 18px;}')
 
 deck = genanki.Deck(
   random.randrange(1 << 30, 1 << 31),
@@ -154,10 +157,14 @@ for word, frequency in sorted_words:
     if definition == None:
         continue
 
-    definition = get_japanese_definition(word)
+    definition = parts_of_speech[word] + '<br/>' + definition
+
+    sentences = ''
+    for sentence in sentence_sets[word]:
+        sentences += sentence + '<br/>'
     
-    fields = [word, hiragana_forms[word], definition, sentences[word]]
-    print(fields)
+    fields = [word, hiragana_forms[word], definition, sentences]
+    print('\n'.join(fields))
     note = genanki.Note(
             model=model,
             fields=fields)
