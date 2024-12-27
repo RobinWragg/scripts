@@ -102,27 +102,22 @@ for phrase in phrases:
 
         if dictionary_form == '為る' or is_roman_only(dictionary_form):
             continue
-        
-        hiragana_forms[dictionary_form] = hiragana
 
+        excluded_parts = ['助動詞', '助詞', '補助記号', '空白', '接続詞', '感動詞', '記号', '連体詞', '代名詞']
+        if  any(token_part_of_speech.startswith(pos) for pos in excluded_parts):
+            continue
+        
         if not dictionary_form in sentence_sets:
             sentence_sets[dictionary_form] = set()
         sentence_sets[dictionary_form].add('「' + phrase + '」')
 
-        processed_part_of_speech = None
-        if token_part_of_speech.startswith(noun):
-            processed_part_of_speech = noun
-        elif token_part_of_speech.startswith(verb):
-            processed_part_of_speech = verb
-        elif token_part_of_speech.startswith(adjective):
-            processed_part_of_speech = adjective
-        
-        if processed_part_of_speech != None:
-            if dictionary_form in words:
-                words[dictionary_form] += 1
-            else:
-                parts_of_speech[dictionary_form] = processed_part_of_speech
-                words[dictionary_form] = 1
+        hiragana_forms[dictionary_form] = hiragana
+        parts_of_speech[dictionary_form] = token_part_of_speech
+
+        if not dictionary_form in words:
+            words[dictionary_form] = 1
+        else:
+            words[dictionary_form] += 1
 
 model = genanki.Model(
     83746180,
@@ -149,6 +144,7 @@ sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
 word_count = 0
 for word, frequency in sorted_words:
     print(str(frequency) + ' occurrences of ' + word)
+
     try_count = 0
     definition = None
     while definition == None and try_count < 3:
@@ -166,13 +162,15 @@ for word, frequency in sorted_words:
     fields = [word, hiragana_forms[word], definition, sentences]
     print('\n'.join(fields))
     note = genanki.Note(
-            model=model,
-            fields=fields)
+        model=model,
+        fields=fields)
     
     deck.add_note(note)
     word_count += 1
     if word_count >= target_word_count:
         break
+
+print(str(word_count) + ' words')
 
 genanki.Package(deck).write_to_file(deck_name + '.apkg')
 
