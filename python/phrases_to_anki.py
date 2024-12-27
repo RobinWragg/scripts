@@ -1,6 +1,6 @@
-deck_name = 'K-On 1'
+deck_name = 'Sakura 1'
 target_word_count = 1000
-subtitle_file = 'k-on-1.ass'
+subtitle_file = 'sakura-1.srt'
 
 import MeCab
 import requests
@@ -61,14 +61,38 @@ def katakana_to_hiragana(text):
 with open(subtitle_file, encoding="utf8") as f:
     subtitles = f.read()
 
-regex = re.compile(r'Dialogue:.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,(.*)')
-braces = re.compile(r'{.*?}')
-found = regex.findall(subtitles)
+parenthesis_regex = re.compile(r'[（(][^（()）]*[)）]')
 
-phrases = []
-for f in found:
-    f = re.sub(braces, '', f)
-    phrases.append(f)
+ass_regex = re.compile(r'Dialogue:.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,.*?,(.*)')
+ass_braces = re.compile(r'{.*?}')
+def get_ass_phrases(file_contents):
+    found = ass_regex.findall(subtitles)
+    phrases = []
+    for f in found:
+        f = re.sub(ass_braces, '', f)
+        f = re.sub(parenthesis_regex, '', f)
+        phrases.append(f)
+    return phrases
+
+srt_regex = re.compile(r'-->[\s0-9:,]+?\n([\w\W]+?)\n\n')
+def get_srt_phrases(file_contents):
+    found = srt_regex.findall(subtitles)
+    phrases = []
+    for f in found:
+        f = re.sub(parenthesis_regex, '\n', f)
+        f = re.sub(parenthesis_regex, '\n', f)
+        f = re.sub(parenthesis_regex, '\n', f)
+        for p in f.split('\n'):
+            p = p.strip()
+            if len(p) > 0:
+                phrases.append(p)
+    return phrases
+
+phrases = None
+if subtitle_file.lower().endswith('srt'):
+    phrases = get_srt_phrases(subtitles)
+else:
+    phrases = get_ass_phrases(subtitles)
 
 words = {}
 
