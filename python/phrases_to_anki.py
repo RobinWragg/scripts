@@ -1,34 +1,39 @@
-deck_name = 'Boku 1'
-target_word_count = 1000
-subtitle_file = 'boku-1.ass'
-
 import MeCab
 import requests
 import sys
 import genanki
 import random
 import re
+import os
 
 if __name__ != '__main__':
     print('This script is not meant to be imported')
     sys.exit()
 
+subtitle_file = sys.argv[1]
+target_word_count = 1000
+deck_name = os.path.basename(subtitle_file).split('.')[0]
+
 def get_japanese_definition(word):
-    url = f"https://jisho.org/api/v1/search/words?keyword={word}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        if data["data"]:
-            count = 0
-            meanings = ''
-            for meaning in data["data"][0]["senses"]:
-                count += 1
-                meanings += str(count) + ': ' + '; '.join(meaning["english_definitions"]) + '<br/>'
-                if count >= 2:
-                    break
-            return meanings
-    print('No definition found for ' + word)
-    return None
+    if len(sys.argv) >= 3 and sys.argv[2] == '-d':
+        return '(-d enabled dry run)'
+    else:
+        url = f"https://jisho.org/api/v1/search/words?keyword={word}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data["data"]:
+                count = 0
+                meanings = ''
+                for meaning in data["data"][0]["senses"]:
+                    count += 1
+                    meanings += str(count) + ': ' + '; '.join(meaning["english_definitions"]) + '<br/>'
+                    if count >= 2:
+                        break
+                return meanings
+        print('No definition found for ' + word)
+        return None
+        
 
 def get_jlpt_level_from_jisho(word):
     url = f"https://jisho.org/api/v1/search/words?keyword={word}"
