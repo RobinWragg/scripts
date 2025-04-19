@@ -1,3 +1,5 @@
+# Sakura cmd: mkvmerge --audio-tracks 1 --subtitle-tracks 3 s.mkv --language 0:jpn s.srt -o output.mkv
+
 import MeCab
 import requests
 import sys
@@ -5,14 +7,15 @@ import genanki
 import random
 import re
 import os
+from typing import Dict, List
 
 if __name__ != '__main__':
     print('This script is not meant to be imported')
     sys.exit()
 
-subtitle_file = sys.argv[1]
-target_word_count = 1000
-deck_name = os.path.basename(subtitle_file).split('.')[0]
+# subtitle_file = sys.argv[1]
+target_word_count = 100000000
+deck_name = 'N5 Vocabulary'
 
 def get_japanese_definition(word):
     if len(sys.argv) >= 3 and sys.argv[2] == '-d':
@@ -28,7 +31,7 @@ def get_japanese_definition(word):
                 for meaning in data["data"][0]["senses"]:
                     count += 1
                     meanings += str(count) + ': ' + '; '.join(meaning["english_definitions"]) + '<br/>'
-                    if count >= 2:
+                    if count >= 3:
                         break
                 return meanings
         print('No definition found for ' + word)
@@ -63,8 +66,8 @@ def katakana_to_hiragana(text):
     # Convert each character
     return ''.join(convert_dict.get(char, char) for char in text)
 
-with open(subtitle_file, encoding="utf8") as f:
-    subtitles = f.read()
+# with open(subtitle_file, encoding="utf8") as f:
+#     subtitles = f.read()
 
 parenthesis_regex = re.compile(r'[（(][^（()）]*[)）]')
 
@@ -94,12 +97,11 @@ def get_srt_phrases(file_contents):
     return phrases
 
 phrases = None
-if subtitle_file.lower().endswith('srt'):
-    phrases = get_srt_phrases(subtitles)
-else:
-    phrases = get_ass_phrases(subtitles)
+# if subtitle_file.lower().endswith('srt'):
+#     phrases = get_srt_phrases(subtitles)
+# else:
+#     phrases = get_ass_phrases(subtitles)
 
-words = {}
 
 # Parts of speech (品詞, ひんし)
 noun = '名詞' # めいし
@@ -115,40 +117,59 @@ suffix = '接尾詞' # せつびし
 auxiliary = '助動詞' # じょどうし
 others = 'その他' # そのた
 
+words = {}
 parts_of_speech = {}
 hiragana_sets = {}
 sentence_sets = {}
 
-for phrase in phrases:
-    tagger = MeCab.Tagger()
-    tokens = tagger.parse(phrase).splitlines()[:-1]
-    for token in tokens:
-        token_parts = token.split('\t')
-        katakana = token_parts[2]
-        hiragana = katakana_to_hiragana(katakana)
-        dictionary_form = token_parts[3].split('-')[0]
-        token_part_of_speech = token_parts[4]
+def fetch_n5_vocab() -> List[Dict]:
+    """Fetch JLPT N5 vocabulary from API"""
+    url = "https://jlpt-vocab-api.vercel.app/api/words/all?level=5"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"API request failed with status {response.status_code}")
 
-        if dictionary_form == '為る' or is_roman_only(dictionary_form):
-            continue
+for v in fetch_n5_vocab():
+    # {'word': '毎朝', 'meaning': 'every morning', 'furigana': 'まいあさ', 'romaji': 'maiasa', 'level': 5}
+    words[v['word']] = 1
+    parts_of_speech[v['word']] = ''
+    hiragana_sets[v['word']] = set()
+    hiragana_sets[v['word']].add(v['furigana'])
+    sentence_sets[v['word']] = set()
+    # print(v)
+    # sys.exit()
+# for phrase in phrases:
+#     tagger = MeCab.Tagger()
+#     tokens = tagger.parse(phrase).splitlines()[:-1]
+#     for token in tokens:
+#         token_parts = token.split('\t')
+#         katakana = token_parts[2]
+#         hiragana = katakana_to_hiragana(katakana)
+#         dictionary_form = token_parts[3].split('-')[0]
+#         token_part_of_speech = token_parts[4]
 
-        excluded_parts = ['助動詞', '助詞', '補助記号', '空白', '接続詞', '感動詞', '記号', '連体詞', '代名詞']
-        if  any(token_part_of_speech.startswith(pos) for pos in excluded_parts):
-            continue
+#         if dictionary_form == '為る' or is_roman_only(dictionary_form):
+#             continue
+
+#         excluded_parts = ['助動詞', '助詞', '補助記号', '空白', '接続詞', '感動詞', '記号', '連体詞', '代名詞']
+#         if  any(token_part_of_speech.startswith(pos) for pos in excluded_parts):
+#             continue
         
-        if not dictionary_form in sentence_sets:
-            sentence_sets[dictionary_form] = set()
-        sentence_sets[dictionary_form].add('「' + phrase + '」')
+#         if not dictionary_form in sentence_sets:
+#             sentence_sets[dictionary_form] = set()
+#         sentence_sets[dictionary_form].add('「' + phrase + '」')
 
-        if not dictionary_form in hiragana_sets:
-            hiragana_sets[dictionary_form] = set()
-        hiragana_sets[dictionary_form].add(hiragana)
-        parts_of_speech[dictionary_form] = token_part_of_speech
+#         if not dictionary_form in hiragana_sets:
+#             hiragana_sets[dictionary_form] = set()
+#         hiragana_sets[dictionary_form].add(hiragana)
+#         parts_of_speech[dictionary_form] = token_part_of_speech
 
-        if not dictionary_form in words:
-            words[dictionary_form] = 1
-        else:
-            words[dictionary_form] += 1
+#         if not dictionary_form in words:
+#             words[dictionary_form] = 1
+#         else:
+#             words[dictionary_form] += 1
 
 model = genanki.Model(
     83746180,
@@ -174,6 +195,8 @@ deck = genanki.Deck(
 sorted_words = sorted(words.items(), key=lambda item: item[1], reverse=True)
 word_count = 0
 for word, frequency in sorted_words:
+    # if frequency < 2:
+    #     break
     print(str(frequency) + ' occurrences of ' + word)
 
     try_count = 0
