@@ -2,3 +2,5 @@
 /Cargo.lock
 .DS_Store
 /python/yt_download_archive.txt
+/python/anki_audio/venv
+/python/anki_audio/output

@@ -1,0 +1,3 @@
+pysubs2
+pydub
+genanki
