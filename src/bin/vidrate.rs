@@ -99,6 +99,11 @@ fn main() -> Result<()> {
     println!("Video folder: {:?}", args.video_folder);
     println!("Found {} video files", video_files.len());
 
+    // Open browser
+    if let Err(e) = open::that("http://localhost:3000") {
+        eprintln!("Failed to open browser: {}", e);
+    }
+
     tokio::runtime::Runtime::new()?.block_on(async { run_server(state).await })
 }
 
