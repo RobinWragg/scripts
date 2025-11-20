@@ -446,43 +446,52 @@ async fn get_random_pair(State(state): State<AppState>) -> Result<Json<VideoPair
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Separate videos into unrated (no comparisons) and rated
-    let mut unrated: Vec<String> = Vec::new();
-    let mut rated: Vec<String> = Vec::new();
+    // Calculate sort-score (wins + losses) for each video
+    let video_scores: Vec<(String, u32)> = ratings
+        .videos
+        .iter()
+        .map(|(filename, video)| (filename.clone(), video.wins + video.losses))
+        .collect();
 
-    for (filename, video) in &ratings.videos {
-        if video.wins == 0 && video.losses == 0 {
-            unrated.push(filename.clone());
-        } else {
-            rated.push(filename.clone());
-        }
-    }
+    // Find the minimum sort-score
+    let min_score = video_scores
+        .iter()
+        .map(|(_, score)| *score)
+        .min()
+        .unwrap();
+
+    // Filter videos with the minimum sort-score
+    let videos_with_min_score: Vec<String> = video_scores
+        .into_iter()
+        .filter(|(_, score)| *score == min_score)
+        .map(|(filename, _)| filename)
+        .collect();
 
     use rand::seq::SliceRandom;
     let mut rng = rand::thread_rng();
 
-    let video1: String;
-    let video2: String;
-
-    // Prioritize unrated videos
-    if unrated.len() >= 2 {
-        // Pick two unrated videos
-        let sample: Vec<_> = unrated.choose_multiple(&mut rng, 2).cloned().collect();
-        video1 = sample[0].clone();
-        video2 = sample[1].clone();
-    } else if unrated.len() == 1 {
-        // Pick one unrated and one rated
-        video1 = unrated[0].clone();
-        video2 = rated.choose(&mut rng).unwrap().clone();
+    // Pick two videos at random from those with the lowest sort-score
+    // If there's only one video with the min score, we need to pick a second from all videos
+    if videos_with_min_score.len() >= 2 {
+        let sample: Vec<_> = videos_with_min_score
+            .choose_multiple(&mut rng, 2)
+            .cloned()
+            .collect();
+        let video1 = sample[0].clone();
+        let video2 = sample[1].clone();
+        Ok(Json(VideoPair { video1, video2 }))
     } else {
-        // All videos have been rated, pick two randomly
-        let all_videos: Vec<String> = rated;
-        let sample: Vec<_> = all_videos.choose_multiple(&mut rng, 2).cloned().collect();
-        video1 = sample[0].clone();
-        video2 = sample[1].clone();
+        // Only one video with min score, pick it and one other video
+        let video1 = videos_with_min_score[0].clone();
+        let all_other_videos: Vec<String> = ratings
+            .videos
+            .keys()
+            .filter(|k| **k != video1)
+            .cloned()
+            .collect();
+        let video2 = all_other_videos.choose(&mut rng).unwrap().clone();
+        Ok(Json(VideoPair { video1, video2 }))
     }
-
-    Ok(Json(VideoPair { video1, video2 }))
 }
 
 async fn submit_comparison(
@@ -557,5 +566,230 @@ async fn serve_video(
             Ok((StatusCode::OK, [("Content-Type", "video/mp4")], content).into_response())
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_video_selection_logic() {
+        // Create test data with different sort-scores
+        let mut ratings = RatingsData {
+            videos: HashMap::new(),
+        };
+
+        // Videos with sort-score 0 (no comparisons yet)
+        ratings.videos.insert(
+            "video1.mp4".to_string(),
+            VideoRating {
+                filename: "video1.mp4".to_string(),
+                rating: INITIAL_RATING,
+                wins: 0,
+                losses: 0,
+            },
+        );
+        ratings.videos.insert(
+            "video2.mp4".to_string(),
+            VideoRating {
+                filename: "video2.mp4".to_string(),
+                rating: INITIAL_RATING,
+                wins: 0,
+                losses: 0,
+            },
+        );
+
+        // Videos with sort-score 3
+        ratings.videos.insert(
+            "video3.mp4".to_string(),
+            VideoRating {
+                filename: "video3.mp4".to_string(),
+                rating: 1520.0,
+                wins: 1,
+                losses: 2,
+            },
+        );
+        ratings.videos.insert(
+            "video4.mp4".to_string(),
+            VideoRating {
+                filename: "video4.mp4".to_string(),
+                rating: 1480.0,
+                wins: 2,
+                losses: 1,
+            },
+        );
+
+        // Video with sort-score 5
+        ratings.videos.insert(
+            "video5.mp4".to_string(),
+            VideoRating {
+                filename: "video5.mp4".to_string(),
+                rating: 1550.0,
+                wins: 3,
+                losses: 2,
+            },
+        );
+
+        // Find min score and videos with min score
+        let video_scores: Vec<(String, u32)> = ratings
+            .videos
+            .iter()
+            .map(|(filename, video)| (filename.clone(), video.wins + video.losses))
+            .collect();
+
+        let min_score = video_scores.iter().map(|(_, score)| *score).min().unwrap();
+        assert_eq!(min_score, 0, "Minimum sort-score should be 0");
+
+        let videos_with_min_score: Vec<String> = video_scores
+            .into_iter()
+            .filter(|(_, score)| *score == min_score)
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(
+            videos_with_min_score.len(),
+            2,
+            "Should have 2 videos with sort-score 0"
+        );
+        assert!(videos_with_min_score.contains(&"video1.mp4".to_string()));
+        assert!(videos_with_min_score.contains(&"video2.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_video_selection_logic_all_rated() {
+        // Test when all videos have been rated at least once
+        let mut ratings = RatingsData {
+            videos: HashMap::new(),
+        };
+
+        // Videos with sort-score 2
+        ratings.videos.insert(
+            "video1.mp4".to_string(),
+            VideoRating {
+                filename: "video1.mp4".to_string(),
+                rating: 1510.0,
+                wins: 1,
+                losses: 1,
+            },
+        );
+        ratings.videos.insert(
+            "video2.mp4".to_string(),
+            VideoRating {
+                filename: "video2.mp4".to_string(),
+                rating: 1505.0,
+                wins: 2,
+                losses: 0,
+            },
+        );
+
+        // Videos with sort-score 3
+        ratings.videos.insert(
+            "video3.mp4".to_string(),
+            VideoRating {
+                filename: "video3.mp4".to_string(),
+                rating: 1520.0,
+                wins: 1,
+                losses: 2,
+            },
+        );
+
+        let video_scores: Vec<(String, u32)> = ratings
+            .videos
+            .iter()
+            .map(|(filename, video)| (filename.clone(), video.wins + video.losses))
+            .collect();
+
+        let min_score = video_scores.iter().map(|(_, score)| *score).min().unwrap();
+        assert_eq!(min_score, 2, "Minimum sort-score should be 2");
+
+        let videos_with_min_score: Vec<String> = video_scores
+            .into_iter()
+            .filter(|(_, score)| *score == min_score)
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(
+            videos_with_min_score.len(),
+            2,
+            "Should have 2 videos with sort-score 2"
+        );
+        assert!(videos_with_min_score.contains(&"video1.mp4".to_string()));
+        assert!(videos_with_min_score.contains(&"video2.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_sort_score_calculation() {
+        // Verify that sort-score is correctly calculated as wins + losses
+        let video = VideoRating {
+            filename: "test.mp4".to_string(),
+            rating: 1500.0,
+            wins: 3,
+            losses: 2,
+        };
+
+        let sort_score = video.wins + video.losses;
+        assert_eq!(sort_score, 5, "Sort-score should be wins + losses");
+    }
+
+    #[test]
+    fn test_video_selection_only_one_with_min_score() {
+        // Test edge case where only one video has the minimum sort-score
+        let mut ratings = RatingsData {
+            videos: HashMap::new(),
+        };
+
+        // Video with sort-score 0
+        ratings.videos.insert(
+            "video1.mp4".to_string(),
+            VideoRating {
+                filename: "video1.mp4".to_string(),
+                rating: INITIAL_RATING,
+                wins: 0,
+                losses: 0,
+            },
+        );
+
+        // Videos with higher sort-scores
+        ratings.videos.insert(
+            "video2.mp4".to_string(),
+            VideoRating {
+                filename: "video2.mp4".to_string(),
+                rating: 1520.0,
+                wins: 2,
+                losses: 1,
+            },
+        );
+        ratings.videos.insert(
+            "video3.mp4".to_string(),
+            VideoRating {
+                filename: "video3.mp4".to_string(),
+                rating: 1480.0,
+                wins: 1,
+                losses: 2,
+            },
+        );
+
+        let video_scores: Vec<(String, u32)> = ratings
+            .videos
+            .iter()
+            .map(|(filename, video)| (filename.clone(), video.wins + video.losses))
+            .collect();
+
+        let min_score = video_scores.iter().map(|(_, score)| *score).min().unwrap();
+        assert_eq!(min_score, 0, "Minimum sort-score should be 0");
+
+        let videos_with_min_score: Vec<String> = video_scores
+            .into_iter()
+            .filter(|(_, score)| *score == min_score)
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(
+            videos_with_min_score.len(),
+            1,
+            "Should have 1 video with sort-score 0"
+        );
+        assert!(videos_with_min_score.contains(&"video1.mp4".to_string()));
     }
 }
