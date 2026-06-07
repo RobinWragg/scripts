@@ -146,6 +146,54 @@ fn save_ratings(path: &PathBuf, ratings: &RatingsData) -> Result<()> {
     Ok(())
 }
 
+fn least_compared_videos(ratings: &RatingsData) -> Vec<String> {
+    let Some(min_score) = ratings
+        .videos
+        .values()
+        .map(|video| video.wins + video.losses)
+        .min()
+    else {
+        return Vec::new();
+    };
+
+    let mut videos: Vec<String> = ratings
+        .videos
+        .iter()
+        .filter(|(_, video)| video.wins + video.losses == min_score)
+        .map(|(filename, _)| filename.clone())
+        .collect();
+    videos.sort();
+    videos
+}
+
+fn other_videos(ratings: &RatingsData, selected_video: &str) -> Vec<String> {
+    let mut videos: Vec<String> = ratings
+        .videos
+        .keys()
+        .filter(|filename| filename.as_str() != selected_video)
+        .cloned()
+        .collect();
+    videos.sort();
+    videos
+}
+
+fn select_video_pair<R: rand::Rng + ?Sized>(
+    ratings: &RatingsData,
+    rng: &mut R,
+) -> Option<VideoPair> {
+    if ratings.videos.len() < 2 {
+        return None;
+    }
+
+    use rand::seq::SliceRandom;
+
+    let least_compared = least_compared_videos(ratings);
+    let video1 = least_compared.choose(rng)?.clone();
+    let video2 = other_videos(ratings, &video1).choose(rng)?.clone();
+
+    Some(VideoPair { video1, video2 })
+}
+
 fn calculate_elo(winner_rating: f64, loser_rating: f64) -> (f64, f64) {
     let expected_winner = 1.0 / (1.0 + 10_f64.powf((loser_rating - winner_rating) / 400.0));
     let expected_loser = 1.0 / (1.0 + 10_f64.powf((winner_rating - loser_rating) / 400.0));
@@ -446,57 +494,11 @@ async fn serve_rankings_page() -> Html<String> {
 
 async fn get_random_pair(State(state): State<AppState>) -> Result<Json<VideoPair>, StatusCode> {
     let ratings = state.ratings.lock().unwrap();
-
-    if ratings.videos.len() < 2 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Calculate sort-score (wins + losses) for each video
-    let video_scores: Vec<(String, u32)> = ratings
-        .videos
-        .iter()
-        .map(|(filename, video)| (filename.clone(), video.wins + video.losses))
-        .collect();
-
-    // Find the minimum sort-score
-    let min_score = video_scores
-        .iter()
-        .map(|(_, score)| *score)
-        .min()
-        .unwrap();
-
-    // Filter videos with the minimum sort-score
-    let videos_with_min_score: Vec<String> = video_scores
-        .into_iter()
-        .filter(|(_, score)| *score == min_score)
-        .map(|(filename, _)| filename)
-        .collect();
-
-    use rand::seq::SliceRandom;
     let mut rng = rand::thread_rng();
 
-    // Pick two videos at random from those with the lowest sort-score
-    // If there's only one video with the min score, we need to pick a second from all videos
-    if videos_with_min_score.len() >= 2 {
-        let sample: Vec<_> = videos_with_min_score
-            .choose_multiple(&mut rng, 2)
-            .cloned()
-            .collect();
-        let video1 = sample[0].clone();
-        let video2 = sample[1].clone();
-        Ok(Json(VideoPair { video1, video2 }))
-    } else {
-        // Only one video with min score, pick it and one other video
-        let video1 = videos_with_min_score[0].clone();
-        let all_other_videos: Vec<String> = ratings
-            .videos
-            .keys()
-            .filter(|k| **k != video1)
-            .cloned()
-            .collect();
-        let video2 = all_other_videos.choose(&mut rng).unwrap().clone();
-        Ok(Json(VideoPair { video1, video2 }))
-    }
+    select_video_pair(&ratings, &mut rng)
+        .map(Json)
+        .ok_or(StatusCode::BAD_REQUEST)
 }
 
 async fn submit_comparison(
@@ -577,6 +579,16 @@ async fn serve_video(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    fn make_video(filename: &str, rating: f64, wins: u32, losses: u32) -> VideoRating {
+        VideoRating {
+            filename: filename.to_string(),
+            rating,
+            wins,
+            losses,
+        }
+    }
 
     #[test]
     fn test_video_selection_logic() {
@@ -659,6 +671,41 @@ mod tests {
         );
         assert!(videos_with_min_score.contains(&"video1.mp4".to_string()));
         assert!(videos_with_min_score.contains(&"video2.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_other_videos_uses_entire_remaining_list() {
+        let mut ratings = RatingsData {
+            videos: HashMap::new(),
+        };
+
+        ratings.videos.insert(
+            "video1.mp4".to_string(),
+            make_video("video1.mp4", INITIAL_RATING, 0, 0),
+        );
+        ratings.videos.insert(
+            "video2.mp4".to_string(),
+            make_video("video2.mp4", INITIAL_RATING, 0, 0),
+        );
+        ratings.videos.insert(
+            "video3.mp4".to_string(),
+            make_video("video3.mp4", 1520.0, 3, 0),
+        );
+        ratings.videos.insert(
+            "video4.mp4".to_string(),
+            make_video("video4.mp4", 1480.0, 1, 2),
+        );
+
+        let remaining = other_videos(&ratings, "video1.mp4");
+
+        assert_eq!(
+            remaining,
+            vec![
+                "video2.mp4".to_string(),
+                "video3.mp4".to_string(),
+                "video4.mp4".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -796,5 +843,10 @@ mod tests {
             "Should have 1 video with sort-score 0"
         );
         assert!(videos_with_min_score.contains(&"video1.mp4".to_string()));
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let pair = select_video_pair(&ratings, &mut rng).unwrap();
+        assert_eq!(pair.video1, "video1.mp4");
+        assert!(pair.video2 == "video2.mp4" || pair.video2 == "video3.mp4");
     }
 }
