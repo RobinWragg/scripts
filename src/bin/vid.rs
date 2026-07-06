@@ -4,6 +4,8 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -17,8 +19,7 @@ pub struct VideoDetails {
     pub date: DateTime,
 }
 
-const CHANNELS_FILE_PATH: &str =
-    "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video/yt-channels.txt";
+const CHANNELS_ROOT_PATH: &str = "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video";
 const ACCEPT_LANGUAGE_HEADER: &str = "Accept-Language: en-US,en;q=0.9";
 const ACCEPT_HEADER: &str =
     "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -50,7 +51,10 @@ pub fn get_channel_videos(channel_id: &str) -> AppResult<Vec<VideoDetails>> {
                     videos_out.push(video);
                 }
             }
-            Err(e) => println!("Failed to get video: {} because: {}", video_value, e),
+            Err(e) => {
+                let video_id = video_value["contentId"].as_str().unwrap_or("<unknown>");
+                println!("Failed to get video {} because: {}", video_id, e);
+            }
         }
     }
 
@@ -83,7 +87,12 @@ fn fetch_channel_videos_page(channel_id: &str) -> AppResult<String> {
 }
 
 fn get_video(channel_id: &str, value: &JsonValue, now: &DateTime) -> AppResult<VideoDetails> {
-    let recency = value["metadata"]["lockupMetadataViewModel"]["metadata"]
+    let video_id = value["contentId"]
+        .as_str()
+        .ok_or("Couldn't get contentId str")?
+        .to_string();
+
+    let recency = match value["metadata"]["lockupMetadataViewModel"]["metadata"]
         ["contentMetadataViewModel"]["metadataRows"][0]["metadataParts"]
         .as_array()
         .and_then(|parts| {
@@ -91,15 +100,15 @@ fn get_video(channel_id: &str, value: &JsonValue, now: &DateTime) -> AppResult<V
                 .iter()
                 .filter_map(|part| part["text"]["content"].as_str())
                 .find(|s| s.contains("ago"))
-        })
-        .map(|s| s.to_string())
-        .ok_or("Couldn't get recency string")?;
+        }) {
+        Some(recency) => recency.to_string(),
+        None => {
+            eprintln!("Couldn't get recency string for video {}", video_id);
+            return Err("Couldn't get recency string".into());
+        }
+    };
 
     let date = parse_recency(&recency, now)?;
-    let video_id = value["contentId"]
-        .as_str()
-        .ok_or("Couldn't get contentId str")?
-        .to_string();
     let title = value["metadata"]["lockupMetadataViewModel"]["title"]["content"]
         .as_str()
         .ok_or("Couldn't get title string")?
@@ -220,34 +229,186 @@ fn parse_recency(s: &str, now: &DateTime) -> AppResult<DateTime> {
     Ok(*now - Duration::from_secs(seconds))
 }
 
-fn parse_channel_name(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
+#[derive(Debug)]
+struct ChannelSource {
+    display_name: String,
+    channel_id: String,
+    config_path: PathBuf,
+    channel_path: PathBuf,
+}
+
+fn load_channels_from_configs() -> AppResult<Vec<ChannelSource>> {
+    let mut channels = vec![];
+
+    for entry in fs::read_dir(CHANNELS_ROOT_PATH)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(display_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+
+        let config_path = path.join("config.json");
+        if !config_path.exists() {
+            let config_json = serde_json::json!({
+                "channel_id": display_name,
+                "downloaded_videos": []
+            });
+            save_config(&config_path, &config_json)?;
+            println!("Created config.json for {}", display_name);
+        }
+
+        let config_file = fs::read_to_string(&config_path)?;
+        let config_json: JsonValue = serde_json::from_str(&config_file)?;
+        let Some(channel_id) = config_json["channel_id"].as_str() else {
+            println!(
+                "Skipping {}: missing channel_id in config.json",
+                display_name
+            );
+            continue;
+        };
+
+        channels.push(ChannelSource {
+            display_name: display_name.to_string(),
+            channel_id: channel_id.to_string(),
+            config_path,
+            channel_path: path,
+        });
     }
 
-    let line = line.trim_end_matches('/');
-    let line = line
-        .strip_prefix("https://www.youtube.com/@")
-        .unwrap_or(line);
-    let line = line.strip_prefix('@').unwrap_or(line);
+    channels.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    Ok(channels)
+}
 
-    if line.is_empty() {
-        None
-    } else {
-        Some(line.to_string())
+fn read_config(path: &Path) -> AppResult<JsonValue> {
+    let config_file = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&config_file)?)
+}
+
+fn get_downloaded_videos(config: &JsonValue) -> Vec<String> {
+    config["downloaded_videos"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_downloaded_videos(config: &mut JsonValue, videos: &[String]) {
+    config["downloaded_videos"] = JsonValue::Array(
+        videos
+            .iter()
+            .map(|id| JsonValue::String(id.clone()))
+            .collect(),
+    );
+}
+
+fn save_config(path: &Path, config: &JsonValue) -> AppResult<()> {
+    let serialized = serde_json::to_string_pretty(config)?;
+    fs::write(path, format!("{}\n", serialized))?;
+    Ok(())
+}
+
+fn download_video(video_id: &str, channel_path: &Path, skip_download: bool) -> AppResult<bool> {
+    if skip_download {
+        println!("Skipping download for {}", video_id);
+        return Ok(true);
     }
+
+    let url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let output = Command::new("yt-dlp")
+        .current_dir(channel_path)
+        .arg("-S")
+        .arg("+height:500") // minimum height
+        .arg("-o")
+        .arg("%(title)s.%(ext)s")
+        .arg(&url)
+        .output()?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_members_only_error(&stderr) {
+        println!(
+            "Treating members-only video {} as successfully handled",
+            video_id
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn is_members_only_error(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("members-only")
+        || stderr.contains("available to this channel's members")
+        || stderr.contains("join this channel to get access")
 }
 
 fn main() -> AppResult<()> {
-    let channels_file = fs::read_to_string(CHANNELS_FILE_PATH)?;
+    let channels = load_channels_from_configs()?;
+    let skip_downloads = std::env::args().any(|arg| arg == "--skip-downloads");
 
-    for channel in channels_file.lines().filter_map(parse_channel_name) {
-        println!("Channel: {}", channel);
-        match get_channel_videos(&channel) {
-            Ok(videos) => println!("{:#?}", videos),
-            Err(e) => eprintln!("Failed to get videos for {}: {}", channel, e),
+    for channel in channels {
+        println!("Channel: {} ({})", channel.display_name, channel.channel_id);
+        let mut config = read_config(&channel.config_path)?;
+        let mut downloaded_videos = get_downloaded_videos(&config);
+        let mut downloaded_set: HashSet<String> = downloaded_videos.iter().cloned().collect();
+
+        let videos = match get_channel_videos(&channel.channel_id) {
+            Ok(videos) => videos,
+            Err(e) => {
+                eprintln!(
+                    "Failed to get videos for {} ({}): {}",
+                    channel.display_name, channel.channel_id, e
+                );
+                println!();
+                continue;
+            }
+        };
+
+        println!("Found {} videos", videos.len());
+        for video in &videos {
+            if downloaded_set.contains(&video.video_id) {
+                continue;
+            }
+
+            println!("Downloading {} - {}", video.video_id, video.title);
+            match download_video(&video.video_id, &channel.channel_path, skip_downloads) {
+                Ok(true) => {
+                    downloaded_set.insert(video.video_id.clone());
+                    downloaded_videos.push(video.video_id.clone());
+                    set_downloaded_videos(&mut config, &downloaded_videos);
+                    save_config(&channel.config_path, &config)?;
+                }
+                Ok(false) => {
+                    eprintln!("yt-dlp failed for {}", video.video_id);
+                }
+                Err(e) => {
+                    eprintln!("Failed to run yt-dlp for {}: {}", video.video_id, e);
+                }
+            }
         }
+
+        let current_video_ids: HashSet<String> =
+            videos.iter().map(|v| v.video_id.clone()).collect();
+        let mut seen = HashSet::new();
+        downloaded_videos.retain(|id| current_video_ids.contains(id) && seen.insert(id.clone()));
+
+        set_downloaded_videos(&mut config, &downloaded_videos);
+        save_config(&channel.config_path, &config)?;
+
+        println!(
+            "Synced downloaded_videos: {} entries",
+            downloaded_videos.len()
+        );
         println!();
     }
 
