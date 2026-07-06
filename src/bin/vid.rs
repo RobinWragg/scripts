@@ -1,22 +1,18 @@
 use curl;
-use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
-type DateTime = chrono::DateTime<chrono::Utc>;
 
 #[derive(Clone, Debug)]
 pub struct VideoDetails {
     pub video_id: String,
     pub channel_id: String,
     pub title: String,
-    pub date: DateTime,
 }
 
 const CHANNELS_ROOT_PATH: &str = "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video";
@@ -40,12 +36,11 @@ pub fn get_channel_videos(channel_id: &str) -> AppResult<Vec<VideoDetails>> {
     let mut video_objects = vec![];
     collect_lockup_videos(&serde_value, &mut video_objects);
 
-    let now = chrono::Utc::now();
     let mut seen_video_ids = HashSet::new();
     let mut videos_out = vec![];
 
     for video_value in video_objects {
-        match get_video(channel_id, video_value, &now) {
+        match get_video(channel_id, video_value) {
             Ok(video) => {
                 if seen_video_ids.insert(video.video_id.clone()) {
                     videos_out.push(video);
@@ -86,29 +81,12 @@ fn fetch_channel_videos_page(channel_id: &str) -> AppResult<String> {
     Ok(std::str::from_utf8(&dst)?.to_string())
 }
 
-fn get_video(channel_id: &str, value: &JsonValue, now: &DateTime) -> AppResult<VideoDetails> {
+fn get_video(channel_id: &str, value: &JsonValue) -> AppResult<VideoDetails> {
     let video_id = value["contentId"]
         .as_str()
         .ok_or("Couldn't get contentId str")?
         .to_string();
 
-    let recency = match value["metadata"]["lockupMetadataViewModel"]["metadata"]
-        ["contentMetadataViewModel"]["metadataRows"][0]["metadataParts"]
-        .as_array()
-        .and_then(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part["text"]["content"].as_str())
-                .find(|s| s.contains("ago"))
-        }) {
-        Some(recency) => recency.to_string(),
-        None => {
-            eprintln!("Couldn't get recency string for video {}", video_id);
-            return Err("Couldn't get recency string".into());
-        }
-    };
-
-    let date = parse_recency(&recency, now)?;
     let title = value["metadata"]["lockupMetadataViewModel"]["title"]["content"]
         .as_str()
         .ok_or("Couldn't get title string")?
@@ -118,7 +96,6 @@ fn get_video(channel_id: &str, value: &JsonValue, now: &DateTime) -> AppResult<V
         channel_id: channel_id.to_string(),
         video_id,
         title,
-        date,
     })
 }
 
@@ -197,36 +174,6 @@ fn is_lockup_video_item(value: &JsonValue) -> bool {
 
 fn video_list_url(channel_id: &str) -> String {
     "https://www.youtube.com/@".to_owned() + channel_id + "/videos"
-}
-
-fn parse_recency(s: &str, now: &DateTime) -> AppResult<DateTime> {
-    const SECONDS_PER_MINUTE: u64 = 60;
-    const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
-    const SECONDS_PER_DAY: u64 = SECONDS_PER_HOUR * 24;
-    const SECONDS_PER_WEEK: u64 = SECONDS_PER_DAY * 7;
-    const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30; // Approximate!
-    const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365; // Approximate!
-
-    let re = Regex::new(r"(?i)(?:streamed\s+)?(\d+)\s*([a-z]+)\s*ago")?;
-    let captures = re
-        .captures(s)
-        .ok_or(format!("captures() call failed on str: {s}"))?;
-
-    let base_number = captures[1].parse::<u64>()?;
-
-    let unit = captures[2].to_ascii_lowercase();
-    let seconds = match unit.as_str() {
-        "s" | "sec" | "secs" | "second" | "seconds" => base_number,
-        "m" | "min" | "mins" | "minute" | "minutes" => base_number * SECONDS_PER_MINUTE,
-        "h" | "hr" | "hrs" | "hour" | "hours" => base_number * SECONDS_PER_HOUR,
-        "d" | "day" | "days" => base_number * SECONDS_PER_DAY,
-        "w" | "week" | "weeks" => base_number * SECONDS_PER_WEEK,
-        "mo" | "mon" | "month" | "months" => base_number * SECONDS_PER_MONTH,
-        "y" | "yr" | "yrs" | "year" | "years" => base_number * SECONDS_PER_YEAR,
-        _ => return Err(format!("Unknown recency unit: {}", unit).into()),
-    };
-
-    Ok(*now - Duration::from_secs(seconds))
 }
 
 #[derive(Debug)]
@@ -440,8 +387,7 @@ mod tests {
                 }
             }
         });
-        let now = chrono::Utc::now();
-        let video = get_video("mychannel", &json, &now).unwrap();
+        let video = get_video("mychannel", &json).unwrap();
         assert_eq!(video.video_id, "abc123");
         assert_eq!(video.channel_id, "mychannel");
         assert_eq!(video.title, "Example title");
