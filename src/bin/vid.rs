@@ -3,7 +3,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -15,7 +15,10 @@ pub struct VideoDetails {
     pub title: String,
 }
 
-const CHANNELS_ROOT_PATH: &str = "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video";
+const CHANNELS_ROOT_PATH: &str = "/Volumes/main/server/videofeed";
+// const CHANNELS_ROOT_PATH: &str = "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video";
+const CHANNELS_LIST_FILENAME: &str = "yt-channels.txt";
+const DOWNLOADED_LIST_FILENAME: &str = "yt-downloaded.txt";
 const ACCEPT_LANGUAGE_HEADER: &str = "Accept-Language: en-US,en;q=0.9";
 const ACCEPT_HEADER: &str =
     "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -176,103 +179,148 @@ fn video_list_url(channel_id: &str) -> String {
     "https://www.youtube.com/@".to_owned() + channel_id + "/videos"
 }
 
-#[derive(Debug)]
-struct ChannelSource {
-    display_name: String,
-    channel_id: String,
-    config_path: PathBuf,
-    channel_path: PathBuf,
+fn channels_list_path() -> String {
+    format!("{}/{}", CHANNELS_ROOT_PATH, CHANNELS_LIST_FILENAME)
 }
 
-fn load_channels_from_configs() -> AppResult<Vec<ChannelSource>> {
-    let mut channels = vec![];
+fn downloaded_list_path() -> String {
+    format!("{}/{}", CHANNELS_ROOT_PATH, DOWNLOADED_LIST_FILENAME)
+}
 
-    for entry in fs::read_dir(CHANNELS_ROOT_PATH)? {
-        let path = entry?.path();
-        if !path.is_dir() {
+#[derive(Clone, Debug)]
+struct ChannelRule {
+    channel_id: String,
+    ignore_substrings: Vec<String>,
+    min_height: u32,
+}
+
+fn parse_channel_rule(line: &str, line_number: usize) -> AppResult<ChannelRule> {
+    let mut parts = line.split_whitespace();
+    let Some(channel_id) = parts.next() else {
+        return Err(format!("Line {} is missing a channel id", line_number).into());
+    };
+
+    let mut ignore_substrings = Vec::new();
+    let mut min_height = 700u32;
+    let mut saw_height_override = false;
+
+    for token in parts {
+        if let Some(ignore) = token.strip_prefix('-') {
+            if ignore.is_empty() {
+                return Err(format!(
+                    "Line {} has an empty ignore modifier: {}",
+                    line_number, token
+                )
+                .into());
+            }
+            ignore_substrings.push(ignore.to_ascii_lowercase());
             continue;
         }
 
-        let Some(display_name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
+        if token.chars().all(|c| c.is_ascii_digit()) {
+            if saw_height_override {
+                return Err(format!(
+                    "Line {} has more than one numeric height modifier",
+                    line_number
+                )
+                .into());
+            }
 
-        let config_path = path.join("config.json");
-        if !config_path.exists() {
-            let config_json = serde_json::json!({
-                "channel_id": display_name,
-                "downloaded_videos": []
-            });
-            save_config(&config_path, &config_json)?;
-            println!("Created config.json for {}", display_name);
+            let parsed = token.parse::<u32>()?;
+            if parsed == 0 {
+                return Err(format!("Line {} has invalid height 0", line_number).into());
+            }
+
+            min_height = parsed;
+            saw_height_override = true;
+            continue;
         }
 
-        let config_file = fs::read_to_string(&config_path)?;
-        let config_json: JsonValue = serde_json::from_str(&config_file)?;
-        let Some(channel_id) = config_json["channel_id"].as_str() else {
-            println!(
-                "Skipping {}: missing channel_id in config.json",
-                display_name
-            );
-            continue;
-        };
-
-        channels.push(ChannelSource {
-            display_name: display_name.to_string(),
-            channel_id: channel_id.to_string(),
-            config_path,
-            channel_path: path,
-        });
+        return Err(format!("Line {} has invalid modifier: {}", line_number, token).into());
     }
 
-    channels.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    Ok(ChannelRule {
+        channel_id: channel_id.to_string(),
+        ignore_substrings,
+        min_height,
+    })
+}
+
+fn load_channel_rules() -> AppResult<Vec<ChannelRule>> {
+    let path = channels_list_path();
+    let content = fs::read_to_string(&path)?;
+
+    let mut channels = Vec::new();
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        channels.push(parse_channel_rule(line, line_number)?);
+    }
+
     Ok(channels)
 }
 
-fn read_config(path: &Path) -> AppResult<JsonValue> {
-    let config_file = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&config_file)?)
+fn should_ignore_video(title: &str, ignore_substrings: &[String]) -> bool {
+    let lowercase_title = title.to_ascii_lowercase();
+    ignore_substrings
+        .iter()
+        .any(|needle| lowercase_title.contains(needle))
 }
 
-fn get_downloaded_videos(config: &JsonValue) -> Vec<String> {
-    config["downloaded_videos"]
-        .as_array()
-        .map(|ids| {
-            ids.iter()
-                .filter_map(|value| value.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+fn load_downloaded_video_ids() -> AppResult<HashSet<String>> {
+    let path = downloaded_list_path();
+    if !Path::new(&path).exists() {
+        return Ok(HashSet::new());
+    }
+
+    let content = fs::read_to_string(&path)?;
+    Ok(content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect())
 }
 
-fn set_downloaded_videos(config: &mut JsonValue, videos: &[String]) {
-    config["downloaded_videos"] = JsonValue::Array(
-        videos
-            .iter()
-            .map(|id| JsonValue::String(id.clone()))
-            .collect(),
-    );
-}
+fn save_downloaded_video_ids(ids: &HashSet<String>) -> AppResult<()> {
+    let mut ids_sorted: Vec<&String> = ids.iter().collect();
+    ids_sorted.sort();
 
-fn save_config(path: &Path, config: &JsonValue) -> AppResult<()> {
-    let serialized = serde_json::to_string_pretty(config)?;
-    fs::write(path, format!("{}\n", serialized))?;
+    let mut output = String::new();
+    for id in ids_sorted {
+        output.push_str(id);
+        output.push('\n');
+    }
+
+    fs::write(downloaded_list_path(), output)?;
     Ok(())
 }
 
-fn download_video(video_id: &str, channel_path: &Path, skip_download: bool) -> AppResult<bool> {
+fn download_video(
+    channel_id: &str,
+    video_id: &str,
+    download_root: &Path,
+    min_height: u32,
+    skip_download: bool,
+) -> AppResult<bool> {
     if skip_download {
         println!("Skipping download for {}", video_id);
         return Ok(true);
     }
 
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let output_template = format!("{} - %(title)s.%(ext)s", channel_id);
+    let height_selector = format!("+height:{}", min_height);
     let output = Command::new("yt-dlp")
-        .current_dir(channel_path)
+        .current_dir(download_root)
         .arg("-S")
-        .arg("+height:500") // minimum height
+        .arg(height_selector)
         .arg("-o")
-        .arg("%(title)s.%(ext)s")
+        .arg(output_template)
         .arg(&url)
         .output()?;
 
@@ -289,6 +337,17 @@ fn download_video(video_id: &str, channel_path: &Path, skip_download: bool) -> A
         return Ok(true);
     }
 
+    let stderr_trimmed = stderr.trim();
+    if !stderr_trimmed.is_empty() {
+        eprintln!("yt-dlp error for {}:\n{}", video_id, stderr_trimmed);
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout_trimmed = stdout.trim();
+        if !stdout_trimmed.is_empty() {
+            eprintln!("yt-dlp output for {}:\n{}", video_id, stdout_trimmed);
+        }
+    }
+
     Ok(false)
 }
 
@@ -300,22 +359,18 @@ fn is_members_only_error(stderr: &str) -> bool {
 }
 
 fn main() -> AppResult<()> {
-    let channels = load_channels_from_configs()?;
+    let channels = load_channel_rules()?;
+    let download_root = Path::new(CHANNELS_ROOT_PATH);
+    let mut downloaded_videos = load_downloaded_video_ids()?;
     let skip_downloads = std::env::args().any(|arg| arg == "--skip-downloads");
 
     for channel in channels {
-        println!("Channel: {} ({})", channel.display_name, channel.channel_id);
-        let mut config = read_config(&channel.config_path)?;
-        let mut downloaded_videos = get_downloaded_videos(&config);
-        let mut downloaded_set: HashSet<String> = downloaded_videos.iter().cloned().collect();
+        println!("Channel: {}", channel.channel_id);
 
         let videos = match get_channel_videos(&channel.channel_id) {
             Ok(videos) => videos,
             Err(e) => {
-                eprintln!(
-                    "Failed to get videos for {} ({}): {}",
-                    channel.display_name, channel.channel_id, e
-                );
+                eprintln!("Failed to get videos for {}: {}", channel.channel_id, e);
                 println!();
                 continue;
             }
@@ -323,17 +378,26 @@ fn main() -> AppResult<()> {
 
         println!("Found {} videos", videos.len());
         for video in &videos {
-            if downloaded_set.contains(&video.video_id) {
+            if downloaded_videos.contains(&video.video_id) {
+                continue;
+            }
+
+            if should_ignore_video(&video.title, &channel.ignore_substrings) {
+                println!("Ignoring {} due to title filter", video.video_id);
                 continue;
             }
 
             println!("Downloading {} - {}", video.video_id, video.title);
-            match download_video(&video.video_id, &channel.channel_path, skip_downloads) {
+            match download_video(
+                &channel.channel_id,
+                &video.video_id,
+                download_root,
+                channel.min_height,
+                skip_downloads,
+            ) {
                 Ok(true) => {
-                    downloaded_set.insert(video.video_id.clone());
-                    downloaded_videos.push(video.video_id.clone());
-                    set_downloaded_videos(&mut config, &downloaded_videos);
-                    save_config(&channel.config_path, &config)?;
+                    downloaded_videos.insert(video.video_id.clone());
+                    save_downloaded_video_ids(&downloaded_videos)?;
                 }
                 Ok(false) => {
                     eprintln!("yt-dlp failed for {}", video.video_id);
@@ -343,21 +407,10 @@ fn main() -> AppResult<()> {
                 }
             }
         }
-
-        let current_video_ids: HashSet<String> =
-            videos.iter().map(|v| v.video_id.clone()).collect();
-        let mut seen = HashSet::new();
-        downloaded_videos.retain(|id| current_video_ids.contains(id) && seen.insert(id.clone()));
-
-        set_downloaded_videos(&mut config, &downloaded_videos);
-        save_config(&channel.config_path, &config)?;
-
-        println!(
-            "Synced downloaded_videos: {} entries",
-            downloaded_videos.len()
-        );
         println!();
     }
+
+    println!("Synced downloaded IDs: {} entries", downloaded_videos.len());
 
     Ok(())
 }
