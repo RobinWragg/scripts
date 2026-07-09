@@ -1,8 +1,6 @@
 use dirs::home_dir;
 use scripts::*;
-use std::fs;
 use std::path::PathBuf;
-use symphonia;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut music_dir = PathBuf::new();

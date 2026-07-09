@@ -8,6 +8,8 @@ use std::process::Command;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
+const CHANNELS_ROOT_PATH_DEFAULT: &str = ".";
+
 #[derive(Clone, Debug)]
 pub struct VideoDetails {
     pub video_id: String,
@@ -15,8 +17,6 @@ pub struct VideoDetails {
     pub title: String,
 }
 
-const CHANNELS_ROOT_PATH: &str = "/Volumes/main/server/videofeed";
-// const CHANNELS_ROOT_PATH: &str = "/Users/robin/Library/Mobile Documents/com~apple~CloudDocs/video";
 const CHANNELS_LIST_FILENAME: &str = "yt-channels.txt";
 const DOWNLOADED_LIST_FILENAME: &str = "yt-downloaded.txt";
 const ACCEPT_LANGUAGE_HEADER: &str = "Accept-Language: en-US,en;q=0.9";
@@ -180,11 +180,20 @@ fn video_list_url(channel_id: &str) -> String {
 }
 
 fn channels_list_path() -> String {
-    format!("{}/{}", CHANNELS_ROOT_PATH, CHANNELS_LIST_FILENAME)
+    format!("{}/{}", channels_root_path(), CHANNELS_LIST_FILENAME)
 }
 
 fn downloaded_list_path() -> String {
-    format!("{}/{}", CHANNELS_ROOT_PATH, DOWNLOADED_LIST_FILENAME)
+    format!("{}/{}", channels_root_path(), DOWNLOADED_LIST_FILENAME)
+}
+
+fn channels_root_path() -> String {
+    std::env::var("VID_CHANNELS_ROOT_PATH")
+        .unwrap_or_else(|_| CHANNELS_ROOT_PATH_DEFAULT.to_string())
+}
+
+fn count_directory_items(path: &Path) -> AppResult<usize> {
+    Ok(fs::read_dir(path)?.count())
 }
 
 #[derive(Clone, Debug)]
@@ -358,11 +367,25 @@ fn is_members_only_error(stderr: &str) -> bool {
         || stderr.contains("join this channel to get access")
 }
 
-fn main() -> AppResult<()> {
-    let channels = load_channel_rules()?;
-    let download_root = Path::new(CHANNELS_ROOT_PATH);
-    let mut downloaded_videos = load_downloaded_video_ids()?;
+fn main() {
+    println!("vid main() running");
+    println!("Operating in path: {}", channels_root_path());
+    let channels = load_channel_rules().expect("Failed to load channel rules");
+    let download_root_root = channels_root_path();
+    let download_root = Path::new(&download_root_root);
+    let download_root_item_count =
+        count_directory_items(download_root).expect("Failed to count dir items");
+    let skip_downloads_due_to_root_size = download_root_item_count > 200;
+    let mut downloaded_videos =
+        load_downloaded_video_ids().expect("Failed to load downloaded video IDs");
     let skip_downloads = std::env::args().any(|arg| arg == "--skip-downloads");
+
+    if skip_downloads_due_to_root_size {
+        println!(
+            "Skipping downloads because root contains {} items (> 200)",
+            download_root_item_count
+        );
+    }
 
     for channel in channels {
         println!("Channel: {}", channel.channel_id);
@@ -377,6 +400,10 @@ fn main() -> AppResult<()> {
         };
 
         println!("Found {} videos", videos.len());
+        if skip_downloads_due_to_root_size {
+            continue;
+        }
+
         for video in &videos {
             if downloaded_videos.contains(&video.video_id) {
                 continue;
@@ -397,7 +424,8 @@ fn main() -> AppResult<()> {
             ) {
                 Ok(true) => {
                     downloaded_videos.insert(video.video_id.clone());
-                    save_downloaded_video_ids(&downloaded_videos)?;
+                    save_downloaded_video_ids(&downloaded_videos)
+                        .expect("Failed to save downloaded video IDs");
                 }
                 Ok(false) => {
                     eprintln!("yt-dlp failed for {}", video.video_id);
@@ -411,8 +439,6 @@ fn main() -> AppResult<()> {
     }
 
     println!("Synced downloaded IDs: {} entries", downloaded_videos.len());
-
-    Ok(())
 }
 
 #[cfg(test)]
