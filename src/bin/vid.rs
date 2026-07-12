@@ -326,6 +326,8 @@ fn download_video(
     let height_selector = format!("+height:{}", min_height);
     let output = Command::new("yt-dlp")
         .current_dir(download_root)
+        .arg("--js-runtimes")
+        .arg("node")
         .arg("-S")
         .arg(height_selector)
         .arg("-o")
@@ -344,6 +346,14 @@ fn download_video(
             video_id
         );
         return Ok(true);
+    }
+
+    if is_scheduled_premiere_error(&stderr) {
+        println!(
+            "Skipping scheduled premiere {} until it becomes available",
+            video_id
+        );
+        return Ok(false);
     }
 
     let stderr_trimmed = stderr.trim();
@@ -365,6 +375,13 @@ fn is_members_only_error(stderr: &str) -> bool {
     stderr.contains("members-only")
         || stderr.contains("available to this channel's members")
         || stderr.contains("join this channel to get access")
+}
+
+fn is_scheduled_premiere_error(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("premieres in ")
+        || stderr.contains("premiere will begin shortly")
+        || stderr.contains("this live event will begin in")
 }
 
 fn main() {

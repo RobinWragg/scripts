@@ -1,0 +1,7 @@
+target
+.git
+.gitignore
+python/tok
+**/__pycache__
+*.pyc
+testdir
