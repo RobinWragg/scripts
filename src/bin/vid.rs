@@ -210,7 +210,7 @@ fn parse_channel_rule(line: &str, line_number: usize) -> AppResult<ChannelRule> 
     };
 
     let mut ignore_substrings = Vec::new();
-    let mut min_height = 700u32;
+    let mut min_height = 800u32;
     let mut saw_height_override = false;
 
     for token in parts {
