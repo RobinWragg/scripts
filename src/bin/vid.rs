@@ -19,6 +19,7 @@ pub struct VideoDetails {
 
 const CHANNELS_LIST_FILENAME: &str = "yt-channels.txt";
 const DOWNLOADED_LIST_FILENAME: &str = "yt-downloaded.txt";
+const YTDLP_JS_RUNTIMES_ENV: &str = "VID_YTDLP_JS_RUNTIMES";
 const ACCEPT_LANGUAGE_HEADER: &str = "Accept-Language: en-US,en;q=0.9";
 const ACCEPT_HEADER: &str =
     "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -309,12 +310,51 @@ fn save_downloaded_video_ids(ids: &HashSet<String>) -> AppResult<()> {
     Ok(())
 }
 
+fn command_exists(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn yt_dlp_js_runtimes() -> Vec<String> {
+    if let Ok(from_env) = std::env::var(YTDLP_JS_RUNTIMES_ENV) {
+        let configured: Vec<String> = from_env
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(|token| token.to_string())
+            .collect();
+
+        if !configured.is_empty() {
+            return configured;
+        }
+    }
+
+    let mut runtimes = Vec::new();
+
+    // yt-dlp defaults to deno. Prefer it first when available.
+    if command_exists("deno") {
+        runtimes.push("deno".to_string());
+    }
+
+    if command_exists("node") {
+        runtimes.push("node".to_string());
+    } else if Path::new("/usr/bin/nodejs").exists() {
+        runtimes.push("node:/usr/bin/nodejs".to_string());
+    }
+
+    runtimes
+}
+
 fn download_video(
     channel_id: &str,
     video_id: &str,
     download_root: &Path,
     min_height: u32,
     skip_download: bool,
+    js_runtimes: &[String],
 ) -> AppResult<bool> {
     if skip_download {
         println!("Skipping download for {}", video_id);
@@ -324,10 +364,14 @@ fn download_video(
     let url = format!("https://www.youtube.com/watch?v={}", video_id);
     let output_template = format!("{} - %(title)s.%(ext)s", channel_id);
     let height_selector = format!("+height:{}", min_height);
-    let output = Command::new("yt-dlp")
-        .current_dir(download_root)
-        .arg("--js-runtimes")
-        .arg("node")
+    let mut command = Command::new("yt-dlp");
+    command.current_dir(download_root);
+
+    for js_runtime in js_runtimes {
+        command.arg("--js-runtimes").arg(js_runtime);
+    }
+
+    let output = command
         .arg("-S")
         .arg(height_selector)
         .arg("-o")
@@ -387,6 +431,15 @@ fn is_scheduled_premiere_error(stderr: &str) -> bool {
 fn main() {
     println!("vid main() running");
     println!("Operating in path: {}", channels_root_path());
+    let yt_dlp_js_runtimes = yt_dlp_js_runtimes();
+    if !yt_dlp_js_runtimes.is_empty() {
+        println!(
+            "Using yt-dlp JS runtimes: {}",
+            yt_dlp_js_runtimes.join(", ")
+        );
+    } else {
+        println!("No yt-dlp JS runtime detected; downloads may fail with YouTube runtime warnings");
+    }
     let channels = load_channel_rules().expect("Failed to load channel rules");
     let download_root_root = channels_root_path();
     let download_root = Path::new(&download_root_root);
@@ -438,6 +491,7 @@ fn main() {
                 download_root,
                 channel.min_height,
                 skip_downloads,
+                &yt_dlp_js_runtimes,
             ) {
                 Ok(true) => {
                     downloaded_videos.insert(video.video_id.clone());
