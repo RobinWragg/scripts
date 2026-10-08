@@ -3,7 +3,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -180,17 +180,22 @@ fn video_list_url(channel_id: &str) -> String {
     "https://www.youtube.com/@".to_owned() + channel_id + "/videos"
 }
 
-fn channels_list_path() -> String {
-    format!("{}/{}", channels_root_path(), CHANNELS_LIST_FILENAME)
+fn channels_list_path() -> PathBuf {
+    channels_root_path().join(CHANNELS_LIST_FILENAME)
 }
 
-fn downloaded_list_path() -> String {
-    format!("{}/{}", channels_root_path(), DOWNLOADED_LIST_FILENAME)
+fn downloaded_list_path() -> PathBuf {
+    channels_root_path().join(DOWNLOADED_LIST_FILENAME)
 }
 
-fn channels_root_path() -> String {
+fn channels_root_path() -> PathBuf {
     std::env::var("VID_CHANNELS_ROOT_PATH")
-        .unwrap_or_else(|_| CHANNELS_ROOT_PATH_DEFAULT.to_string())
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(CHANNELS_ROOT_PATH_DEFAULT))
+}
+
+fn download_root_path() -> PathBuf {
+    channels_root_path().join("videos")
 }
 
 fn count_directory_items(path: &Path) -> AppResult<usize> {
@@ -283,7 +288,7 @@ fn should_ignore_video(title: &str, ignore_substrings: &[String]) -> bool {
 
 fn load_downloaded_video_ids() -> AppResult<HashSet<String>> {
     let path = downloaded_list_path();
-    if !Path::new(&path).exists() {
+    if !path.exists() {
         return Ok(HashSet::new());
     }
 
@@ -430,7 +435,8 @@ fn is_scheduled_premiere_error(stderr: &str) -> bool {
 
 fn main() {
     println!("vid main() running");
-    println!("Operating in path: {}", channels_root_path());
+    let download_root = download_root_path();
+    println!("Operating in path: {}", download_root.display());
     let yt_dlp_js_runtimes = yt_dlp_js_runtimes();
     if !yt_dlp_js_runtimes.is_empty() {
         println!(
@@ -441,10 +447,9 @@ fn main() {
         println!("No yt-dlp JS runtime detected; downloads may fail with YouTube runtime warnings");
     }
     let channels = load_channel_rules().expect("Failed to load channel rules");
-    let download_root_root = channels_root_path();
-    let download_root = Path::new(&download_root_root);
+    fs::create_dir_all(&download_root).expect("Failed to create download root directory");
     let download_root_item_count =
-        count_directory_items(download_root).expect("Failed to count dir items");
+        count_directory_items(download_root.as_path()).expect("Failed to count dir items");
     let skip_downloads_due_to_root_size = download_root_item_count > 200;
     let mut downloaded_videos =
         load_downloaded_video_ids().expect("Failed to load downloaded video IDs");
@@ -488,7 +493,7 @@ fn main() {
             match download_video(
                 &channel.channel_id,
                 &video.video_id,
-                download_root,
+                download_root.as_path(),
                 channel.min_height,
                 skip_downloads,
                 &yt_dlp_js_runtimes,
