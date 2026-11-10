@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -8,6 +8,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -54,6 +55,12 @@ struct VideoPair {
 struct ComparisonResult {
     winner: String,
     loser: String,
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PairQuery {
+    mode: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -166,6 +173,17 @@ fn least_compared_videos(ratings: &RatingsData) -> Vec<String> {
     videos
 }
 
+fn lowest_scored_videos(ratings: &RatingsData) -> Vec<String> {
+    let mut videos: Vec<&VideoRating> = ratings.videos.values().collect();
+    videos.sort_by(|a, b| {
+        a.rating
+            .partial_cmp(&b.rating)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    videos.into_iter().map(|video| video.filename.clone()).collect()
+}
+
 fn other_videos(ratings: &RatingsData, selected_video: &str) -> Vec<String> {
     let mut videos: Vec<String> = ratings
         .videos
@@ -190,6 +208,18 @@ fn select_video_pair<R: rand::Rng + ?Sized>(
     let least_compared = least_compared_videos(ratings);
     let video1 = least_compared.choose(rng)?.clone();
     let video2 = other_videos(ratings, &video1).choose(rng)?.clone();
+
+    Some(VideoPair { video1, video2 })
+}
+
+fn select_lowest_scored_pair(ratings: &RatingsData) -> Option<VideoPair> {
+    if ratings.videos.len() < 2 {
+        return None;
+    }
+
+    let videos = lowest_scored_videos(ratings);
+    let video1 = videos.first()?.clone();
+    let video2 = videos.get(1)?.clone();
 
     Some(VideoPair { video1, video2 })
 }
@@ -261,6 +291,13 @@ async fn serve_compare_page() -> Html<String> {
             max-height: 480px;
             background: #000;
         }
+        .mode-switch {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
         button {
             padding: 15px 30px;
             font-size: 18px;
@@ -273,6 +310,16 @@ async fn serve_compare_page() -> Html<String> {
         }
         button:hover {
             background: #45a049;
+        }
+        button.secondary {
+            background: #3a3a3a;
+        }
+        button.secondary:hover {
+            background: #2f2f2f;
+        }
+        button.active {
+            outline: 2px solid #8ad89d;
+            outline-offset: 2px;
         }
         .nav {
             text-align: center;
@@ -294,6 +341,10 @@ async fn serve_compare_page() -> Html<String> {
             <a href="/rankings">View Rankings</a>
         </div>
         <h1>Video Rating</h1>
+        <div class="mode-switch">
+            <button id="compare-mode" class="active" onclick="setMode('compare')">Standard comparison</button>
+            <button id="delete-mode" class="secondary" onclick="setMode('delete')">Lowest-score delete mode</button>
+        </div>
         <div class="video-container">
             <div class="video-wrapper">
                 <video id="video1" controls autoplay loop muted></video>
@@ -310,10 +361,20 @@ async fn serve_compare_page() -> Html<String> {
 
     <script>
         let currentPair = null;
+        let currentMode = 'compare';
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.getElementById('compare-mode').classList.toggle('active', mode === 'compare');
+            document.getElementById('delete-mode').classList.toggle('active', mode === 'delete');
+            document.getElementById('compare-mode').classList.toggle('secondary', mode !== 'compare');
+            document.getElementById('delete-mode').classList.toggle('secondary', mode !== 'delete');
+            loadPair();
+        }
 
         async function loadPair() {
             try {
-                const response = await fetch('/api/pair');
+                const response = await fetch('/api/pair?mode=' + encodeURIComponent(currentMode));
                 const pair = await response.json();
                 currentPair = pair;
 
@@ -345,7 +406,7 @@ async fn serve_compare_page() -> Html<String> {
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ winner, loser }),
+                    body: JSON.stringify({ winner, loser, mode: currentMode }),
                 });
 
                 loadPair();
@@ -492,13 +553,21 @@ async fn serve_rankings_page() -> Html<String> {
     Html(html.to_string())
 }
 
-async fn get_random_pair(State(state): State<AppState>) -> Result<Json<VideoPair>, StatusCode> {
+async fn get_random_pair(
+    State(state): State<AppState>,
+    Query(query): Query<PairQuery>,
+) -> Result<Json<VideoPair>, StatusCode> {
     let ratings = state.ratings.lock().unwrap();
-    let mut rng = rand::thread_rng();
+    let mode = query.mode.as_deref().unwrap_or("compare");
+    let pair = match mode {
+        "delete" => select_lowest_scored_pair(&ratings),
+        _ => {
+            let mut rng = rand::thread_rng();
+            select_video_pair(&ratings, &mut rng)
+        }
+    };
 
-    select_video_pair(&ratings, &mut rng)
-        .map(Json)
-        .ok_or(StatusCode::BAD_REQUEST)
+    pair.map(Json).ok_or(StatusCode::BAD_REQUEST)
 }
 
 async fn submit_comparison(
@@ -507,6 +576,7 @@ async fn submit_comparison(
 ) -> StatusCode {
     let mut ratings = state.ratings.lock().unwrap();
 
+    let mode = result.mode.as_deref().unwrap_or("compare");
     let winner_rating = ratings
         .videos
         .get(&result.winner)
@@ -528,6 +598,16 @@ async fn submit_comparison(
     if let Some(loser) = ratings.videos.get_mut(&result.loser) {
         loser.rating = new_loser_rating;
         loser.losses += 1;
+    }
+
+    if mode == "delete" {
+        let removed_path = state.video_folder.join(&result.loser);
+        if removed_path.exists() {
+            if let Err(e) = fs::remove_file(&removed_path) {
+                eprintln!("Error deleting loser video {}: {}", result.loser, e);
+            }
+        }
+        ratings.videos.remove(&result.loser);
     }
 
     let ratings_path = state.video_folder.join("ratings.json");
@@ -848,5 +928,39 @@ mod tests {
         let pair = select_video_pair(&ratings, &mut rng).unwrap();
         assert_eq!(pair.video1, "video1.mp4");
         assert!(pair.video2 == "video2.mp4" || pair.video2 == "video3.mp4");
+    }
+
+    #[test]
+    fn test_select_lowest_scored_pair_prefers_bottom_two_ratings() {
+        let mut ratings = RatingsData {
+            videos: HashMap::new(),
+        };
+
+        ratings.videos.insert(
+            "good.mp4".to_string(),
+            make_video("good.mp4", 1800.0, 10, 2),
+        );
+        ratings.videos.insert(
+            "mid.mp4".to_string(),
+            make_video("mid.mp4", 1500.0, 4, 4),
+        );
+        ratings.videos.insert(
+            "bad1.mp4".to_string(),
+            make_video("bad1.mp4", 1200.0, 1, 9),
+        );
+        ratings.videos.insert(
+            "bad2.mp4".to_string(),
+            make_video("bad2.mp4", 1400.0, 2, 7),
+        );
+
+        let pair = select_lowest_scored_pair(&ratings).unwrap();
+
+        assert!(pair.video1 == "bad1.mp4" || pair.video1 == "bad2.mp4");
+        assert!(pair.video2 == "bad1.mp4" || pair.video2 == "bad2.mp4");
+        assert_ne!(pair.video1, pair.video2);
+        assert!(
+            ["bad1.mp4", "bad2.mp4"].contains(&pair.video1.as_str())
+                && ["bad1.mp4", "bad2.mp4"].contains(&pair.video2.as_str())
+        );
     }
 }
