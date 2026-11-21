@@ -24,3 +24,5 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["fs"] }
 rand = "0.8"
 wallpaper = "3.2.0"
+vigilia-platform = "0.2.0"
+crossterm = "0.29.0"
