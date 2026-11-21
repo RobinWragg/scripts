@@ -69,6 +69,15 @@ fn status_title(state: &AppState) -> String {
     }
 }
 
+fn elapsed_delta(last_tick: Instant, now: Instant) -> Duration {
+    let delta = now.saturating_duration_since(last_tick);
+    if delta > Duration::from_secs(3) {
+        Duration::ZERO
+    } else {
+        delta
+    }
+}
+
 fn timer_file_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -124,7 +133,6 @@ fn main() {
     std::thread::spawn(move || {
         let platform = vigilia_platform::native();
         let mut lid_events = platform.lid_events();
-        let mut last_wallpaper_check = Instant::now() - Duration::from_secs(1);
 
         while !worker_stop.load(Ordering::Relaxed) {
             if let Some(events) = &mut lid_events {
@@ -133,15 +141,12 @@ fn main() {
                 }
             }
 
-            if last_wallpaper_check.elapsed() >= Duration::from_secs(1) {
-                if let Some(wallpaper_name) = wallpaper_name() {
-                    worker_state.lock().unwrap().wallpaper_name = Some(wallpaper_name);
-                }
-                last_wallpaper_check = Instant::now();
-
-                let elapsed = worker_state.lock().unwrap().elapsed;
-                save_elapsed(worker_timer_file.as_deref(), elapsed);
+            if let Some(wallpaper_name) = wallpaper_name() {
+                worker_state.lock().unwrap().wallpaper_name = Some(wallpaper_name);
             }
+
+            let elapsed = worker_state.lock().unwrap().elapsed;
+            save_elapsed(worker_timer_file.as_deref(), elapsed);
 
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -247,7 +252,7 @@ fn main() {
             } else if let Some(last_tick) = app_state.last_tick {
                 app_state.elapsed = app_state
                     .elapsed
-                    .saturating_add(now.saturating_duration_since(last_tick));
+                    .saturating_add(elapsed_delta(last_tick, now));
                 app_state.last_tick = Some(now);
             } else {
                 app_state.last_tick = Some(now);
@@ -278,6 +283,24 @@ mod tests {
     fn formats_elapsed_duration() {
         let duration = Duration::from_secs(3 * 3600 + 12 * 60 + 7);
         assert_eq!(format_duration(duration), "3h 12m 7s");
+    }
+
+    #[test]
+    fn discards_elapsed_delta_over_two_seconds() {
+        let now = Instant::now();
+
+        assert_eq!(
+            elapsed_delta(now - Duration::from_secs(1), now),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            elapsed_delta(now - Duration::from_secs(2), now),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            elapsed_delta(now - Duration::from_secs(60), now),
+            Duration::ZERO
+        );
     }
 
     #[test]
