@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-chrono = "0.4"
 clap = { version = "4.0", features = ["derive"] }
 curl = "0.4.46"
 dirs = "5.0.1"
@@ -25,4 +24,5 @@ tower-http = { version = "0.5", features = ["fs"] }
 rand = "0.8"
 wallpaper = "3.2.0"
 vigilia-platform = "0.2.0"
-crossterm = "0.29.0"
+tao = "0.34"
+tray-icon = "0.21.1"

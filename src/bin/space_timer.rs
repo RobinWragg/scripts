@@ -1,44 +1,32 @@
-use std::io::{self, Write};
 use std::path::Path;
-use std::process;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::*;
+use std::time::{Duration, Instant};
 
-use chrono::Duration;
-use crossterm::event::{self, KeyCode, KeyModifiers};
-use crossterm::terminal;
+use tao::event::{Event, StartCause};
+use tao::event_loop::{ControlFlow, EventLoop};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::TrayIconBuilder;
 use vigilia_platform::LidState;
 
-struct RawMode;
+const PAUSE_ITEM_ID: &str = "pause";
+const RESET_ITEM_ID: &str = "reset";
+const QUIT_ITEM_ID: &str = "quit";
+const TIMER_FILE_NAME: &str = "space_timer.elapsed";
 
 #[derive(Default)]
-struct DisplayState {
+struct AppState {
+    elapsed: Duration,
+    last_tick: Option<Instant>,
+    manually_paused: bool,
     wallpaper_name: Option<String>,
     lid_state: Option<LidState>,
 }
 
-impl RawMode {
-    fn enable() -> Self {
-        terminal::enable_raw_mode().expect("failed to enable raw terminal mode");
-        Self
-    }
-}
-
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        terminal::disable_raw_mode().expect("failed to disable raw terminal mode");
-    }
-}
-
-fn space_id() -> String {
-    match wallpaper::get() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("Failed to get current wallpaper: {error}");
-            process::exit(1);
-        }
-    }
+fn space_id() -> Option<String> {
+    wallpaper::get().ok()
 }
 
 fn wallpaper_name() -> Option<String> {
@@ -50,35 +38,93 @@ fn wallpaper_name() -> Option<String> {
     })
 }
 
-fn spinner(i: u64, paused: bool) -> String {
-    if paused {
-        "⏸".to_string()
+fn is_paused(state: &AppState) -> bool {
+    state.manually_paused
+        || state.wallpaper_name.as_deref() != Some("dgnfog.png")
+        || state.lid_state == Some(LidState::Closed)
+}
+
+fn lid_status(lid_state: Option<LidState>) -> &'static str {
+    match lid_state {
+        Some(LidState::Open) => "Lid: open",
+        Some(LidState::Closed) => "Lid: closed",
+        None => "Lid: unknown",
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3600;
+    let minutes = (seconds / 60) % 60;
+    let remaining_seconds = seconds % 60;
+    format!("{hours}h {minutes}m {remaining_seconds}s")
+}
+
+fn status_title(state: &AppState) -> String {
+    let duration = format_duration(state.elapsed);
+    if is_paused(state) {
+        format!("⏸ {duration}")
     } else {
-        match i % 4 {
-            0 => "|".to_string(),
-            1 => "/".to_string(),
-            2 => "-".to_string(),
-            3 => "\\".to_string(),
-            _ => unreachable!(),
+        format!("▶ {duration}")
+    }
+}
+
+fn timer_file_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+        .map(|directory| directory.join(TIMER_FILE_NAME))
+}
+
+fn load_elapsed(path: Option<&Path>) -> Duration {
+    let Some(path) = path else {
+        return Duration::ZERO;
+    };
+
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match contents.trim().parse::<u64>() {
+            Ok(seconds) => Duration::from_secs(seconds),
+            Err(error) => {
+                eprintln!("Failed to parse timer file {}: {error}", path.display());
+                Duration::ZERO
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Duration::ZERO,
+        Err(error) => {
+            eprintln!("Failed to load timer file {}: {error}", path.display());
+            Duration::ZERO
         }
     }
 }
 
+fn save_elapsed(path: Option<&Path>, elapsed: Duration) {
+    let Some(path) = path else {
+        return;
+    };
+
+    if let Err(error) = std::fs::write(path, elapsed.as_secs().to_string()) {
+        eprintln!("Failed to save timer file {}: {error}", path.display());
+    }
+}
+
 fn main() {
-    let mut spinner_state = 0;
+    let space_id = space_id();
+    let timer_file = timer_file_path();
 
-    let id = space_id();
-    println!("Timing space with ID: {id}");
-    let _raw_mode = RawMode::enable();
-
-    let state = Arc::new(Mutex::new(DisplayState::default()));
+    let state = Arc::new(Mutex::new(AppState {
+        elapsed: load_elapsed(timer_file.as_deref()),
+        last_tick: Some(Instant::now()),
+        ..AppState::default()
+    }));
     let stop = Arc::new(AtomicBool::new(false));
+
     let worker_state = Arc::clone(&state);
     let worker_stop = Arc::clone(&stop);
-    let worker = std::thread::spawn(move || {
+    let worker_timer_file = timer_file.clone();
+    std::thread::spawn(move || {
         let platform = vigilia_platform::native();
         let mut lid_events = platform.lid_events();
-        let mut last_wallpaper_check = Instant::now() - std::time::Duration::from_secs(1);
+        let mut last_wallpaper_check = Instant::now() - Duration::from_secs(1);
 
         while !worker_stop.load(Ordering::Relaxed) {
             if let Some(events) = &mut lid_events {
@@ -87,91 +133,183 @@ fn main() {
                 }
             }
 
-            if last_wallpaper_check.elapsed() >= std::time::Duration::from_secs(1) {
+            if last_wallpaper_check.elapsed() >= Duration::from_secs(1) {
                 if let Some(wallpaper_name) = wallpaper_name() {
                     worker_state.lock().unwrap().wallpaper_name = Some(wallpaper_name);
                 }
                 last_wallpaper_check = Instant::now();
+
+                let elapsed = worker_state.lock().unwrap().elapsed;
+                save_elapsed(worker_timer_file.as_deref(), elapsed);
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(Duration::from_secs(1));
         }
     });
 
-    let mut duration = Duration::zero();
-    let mut last_timestamp = Instant::now();
-    let mut paused_manually = false;
+    let mut event_loop = EventLoop::new();
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    event_loop.set_dock_visibility(false);
 
-    loop {
-        if event::poll(std::time::Duration::from_millis(100))
-            .expect("failed to poll terminal input")
-        {
-            if let event::Event::Key(key) = event::read().expect("failed to read terminal input") {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('r') | KeyCode::Char('R'), _) => {
-                        duration = Duration::zero();
-                        last_timestamp = Instant::now();
-                    }
-                    (KeyCode::Char('p') | KeyCode::Char('P'), _) => {
-                        paused_manually = !paused_manually;
-                    }
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        stop.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    _ => {}
+    let menu = Menu::new();
+    let time_item = MenuItem::with_id("time", "Time: 0h 0m 0s", false, None);
+    let space_item = MenuItem::with_id(
+        "space",
+        format!(
+            "Space: {}",
+            space_id
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+        ),
+        false,
+        None,
+    );
+    let wallpaper_item = MenuItem::with_id("wallpaper", "Wallpaper: unknown", false, None);
+    let lid_item = MenuItem::with_id("lid", lid_status(None), false, None);
+    let pause_item = MenuItem::with_id(PAUSE_ITEM_ID, "Pause", true, None);
+    let reset_item = MenuItem::with_id(RESET_ITEM_ID, "Reset", true, None);
+    let quit_item = MenuItem::with_id(QUIT_ITEM_ID, "Quit", true, None);
+    let separator_before_actions = PredefinedMenuItem::separator();
+    let separator_before_quit = PredefinedMenuItem::separator();
+
+    menu.append_items(&[
+        &time_item,
+        &space_item,
+        &wallpaper_item,
+        &lid_item,
+        &separator_before_actions,
+        &pause_item,
+        &reset_item,
+        &separator_before_quit,
+        &quit_item,
+    ])
+    .expect("failed to build the menu bar menu");
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_title(status_title(&state.lock().unwrap()))
+        .with_tooltip("Space Timer")
+        .build()
+        .expect("failed to create the macOS menu bar item");
+
+    let mut should_exit = false;
+    event_loop.run(move |_event, _event_loop, control_flow| {
+        while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
+            let mut app_state = state.lock().unwrap();
+            match menu_event.id().as_ref() {
+                PAUSE_ITEM_ID => {
+                    app_state.manually_paused = !app_state.manually_paused;
+                    app_state.last_tick = Some(Instant::now());
+                    pause_item.set_text(if app_state.manually_paused {
+                        "Resume"
+                    } else {
+                        "Pause"
+                    });
+                    save_elapsed(timer_file.as_deref(), app_state.elapsed);
                 }
+                RESET_ITEM_ID => {
+                    app_state.elapsed = Duration::ZERO;
+                    app_state.last_tick = Some(Instant::now());
+                    save_elapsed(timer_file.as_deref(), app_state.elapsed);
+                }
+                QUIT_ITEM_ID => {
+                    stop.store(true, Ordering::Relaxed);
+                    save_elapsed(timer_file.as_deref(), app_state.elapsed);
+                    should_exit = true;
+                }
+                _ => {}
             }
+            drop(app_state);
         }
 
-        let (wallpaper_name, lid_state) = {
-            let state = state.lock().unwrap();
-            (
-                state
-                    .wallpaper_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                state.lid_state,
+        if !should_exit
+            && matches!(
+                _event,
+                Event::NewEvents(StartCause::Init)
+                    | Event::NewEvents(StartCause::ResumeTimeReached { .. })
+                    | Event::NewEvents(StartCause::Poll)
             )
-        };
-        let lid_name = match lid_state {
-            Some(LidState::Open) => "lid open",
-            Some(LidState::Closed) => "lid closed",
-            None => "lid unknown",
-        };
-
-        let paused = paused_manually
-            || wallpaper_name != "dgnfog.png"
-            || lid_state == Some(LidState::Closed);
-
         {
             let now = Instant::now();
-            if !paused {
-                let delta = Duration::from_std(now - last_timestamp).unwrap();
-                if delta.num_milliseconds() < 1000 {
-                    duration = duration + delta;
-                }
+            let mut app_state = state.lock().unwrap();
+
+            if let Some(wallpaper_name) = app_state.wallpaper_name.as_deref() {
+                wallpaper_item.set_text(format!("Wallpaper: {wallpaper_name}"));
+            } else {
+                wallpaper_item.set_text("Wallpaper: unknown");
             }
-            last_timestamp = now;
+            lid_item.set_text(lid_status(app_state.lid_state));
+
+            if is_paused(&app_state) {
+                app_state.last_tick = Some(now);
+            } else if let Some(last_tick) = app_state.last_tick {
+                app_state.elapsed = app_state
+                    .elapsed
+                    .saturating_add(now.saturating_duration_since(last_tick));
+                app_state.last_tick = Some(now);
+            } else {
+                app_state.last_tick = Some(now);
+            }
+
+            let title = status_title(&app_state);
+            time_item.set_text(format!("Time: {}", format_duration(app_state.elapsed)));
+            tray.set_title(Some(title));
+            let _ = tray.set_tooltip(Some(format!(
+                "Space Timer — {}",
+                format_duration(app_state.elapsed)
+            )));
         }
 
-        let duration_str = {
-            let hours = duration.num_hours();
-            let minutes = duration.num_minutes() - hours * 60;
-            let seconds = duration.num_seconds() - hours * 3600 - minutes * 60;
-            format!("{hours}h {minutes}m {seconds}s")
-        };
+        if should_exit {
+            *control_flow = ControlFlow::Exit;
+        } else {
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
+        }
+    });
+}
 
-        print!(
-            "\x1b[2K\r{spinner} {duration_str}",
-            spinner = spinner(spinner_state, paused)
-        );
-        io::stdout().flush().expect("failed to flush stdout");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // sleep
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        spinner_state = spinner_state.wrapping_add(1);
+    #[test]
+    fn formats_elapsed_duration() {
+        let duration = Duration::from_secs(3 * 3600 + 12 * 60 + 7);
+        assert_eq!(format_duration(duration), "3h 12m 7s");
     }
 
-    worker.join().expect("wallpaper and lid worker panicked");
+    #[test]
+    fn pauses_for_manual_pause_wallpaper_or_closed_lid() {
+        assert!(is_paused(&AppState {
+            manually_paused: true,
+            ..AppState::default()
+        }));
+        assert!(is_paused(&AppState {
+            wallpaper_name: Some("other.png".to_string()),
+            ..AppState::default()
+        }));
+        assert!(is_paused(&AppState {
+            wallpaper_name: Some("dgnfog.png".to_string()),
+            lid_state: Some(LidState::Closed),
+            ..AppState::default()
+        }));
+        assert!(!is_paused(&AppState {
+            wallpaper_name: Some("dgnfog.png".to_string()),
+            lid_state: Some(LidState::Open),
+            ..AppState::default()
+        }));
+    }
+
+    #[test]
+    fn saves_and_loads_elapsed_duration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(TIMER_FILE_NAME);
+        let elapsed = Duration::from_secs(3675);
+
+        save_elapsed(Some(&path), elapsed);
+
+        assert_eq!(load_elapsed(Some(&path)), elapsed);
+    }
 }
