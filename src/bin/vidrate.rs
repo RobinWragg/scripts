@@ -381,8 +381,13 @@ async fn serve_compare_page() -> Html<String> {
                 const video1 = document.getElementById('video1');
                 const video2 = document.getElementById('video2');
 
-                video1.src = '/videos/' + encodeURIComponent(pair.video1);
-                video2.src = '/videos/' + encodeURIComponent(pair.video2);
+                const video1Path = '/videos/' + encodeURIComponent(pair.video1);
+                const video2Path = '/videos/' + encodeURIComponent(pair.video2);
+
+                video1.src = video1Path;
+                video2.src = video2Path;
+
+                console.log('Comparing videos:', { video1: video1Path, video2: video2Path });
 
                 video1.load();
                 video2.load();
