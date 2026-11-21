@@ -15,6 +15,8 @@ const PAUSE_ITEM_ID: &str = "pause";
 const RESET_ITEM_ID: &str = "reset";
 const QUIT_ITEM_ID: &str = "quit";
 const TIMER_FILE_NAME: &str = "space_timer.elapsed";
+const UI_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const DESKTOP_CHECK_INTERVAL: Duration = Duration::from_millis(5000);
 
 #[derive(Default)]
 struct AppState {
@@ -148,7 +150,7 @@ fn main() {
             let elapsed = worker_state.lock().unwrap().elapsed;
             save_elapsed(worker_timer_file.as_deref(), elapsed);
 
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(DESKTOP_CHECK_INTERVAL);
         }
     });
 
@@ -270,7 +272,7 @@ fn main() {
         if should_exit {
             *control_flow = ControlFlow::Exit;
         } else {
-            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + UI_UPDATE_INTERVAL);
         }
     });
 }
