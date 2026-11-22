@@ -11,7 +11,15 @@ url="$1"
 downloads_dir="$HOME/Downloads"
 target_dir="/Volumes/main/server/docker/vid_storage/videos"
 
-downloaded_file="$(yt-dlp --no-playlist -P "$downloads_dir" -S +height:800 --print after_move:filepath "$url")"
+tmp_output_file="$(mktemp)"
+yt-dlp --no-playlist -P "$downloads_dir" -S +height:800 --print after_move:filepath "$url" | tee "$tmp_output_file"
+downloaded_file="$(tail -n 1 "$tmp_output_file")"
+rm -f "$tmp_output_file"
+
+if [ -z "$downloaded_file" ]; then
+  echo "Download completed, but could not determine the downloaded file path." >&2
+  exit 1
+fi
 
 echo "Downloaded: $downloaded_file"
 
