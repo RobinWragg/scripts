@@ -6,6 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         pkg-config \
         libcurl4-openssl-dev \
+        libgtk-3-dev \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,18 +26,17 @@ RUN apt-get update \
         unzip \
         libcurl4 \
         nodejs \
-        python3 \
-        python3-pip \
         ffmpeg \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && /usr/local/bin/deno --version >/dev/null \
-    && python3 -m pip install --no-cache-dir --break-system-packages --upgrade yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VID_YTDLP_JS_RUNTIMES="deno:/usr/local/bin/deno,node:/usr/bin/node,node:/usr/bin/nodejs"
 
 COPY --from=builder /app/target/release/vid /usr/local/bin/vid
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN chmod 0755 /usr/local/bin/docker-entrypoint
 
 WORKDIR /work
 
-ENTRYPOINT ["/bin/sh", "-c", "/usr/local/bin/vid > /work/log.txt 2>&1"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]

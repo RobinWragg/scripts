@@ -26,6 +26,8 @@ wallpaper = "3.2.0"
 vigilia-platform = "0.2.0"
 tao = "0.34"
 tray-icon = "0.21.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "block2"] }
 objc2-foundation = { version = "0.3.2", features = ["NSOperation", "NSString", "block2"] }
 block2 = "0.6.2"
