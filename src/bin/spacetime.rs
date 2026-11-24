@@ -66,7 +66,7 @@ fn format_duration(duration: Duration, long_form: bool) -> String {
     if long_form {
         format!("{hours}h {minutes}m {remaining_seconds}s")
     } else {
-        format!("{hours}:{minutes}")
+        format!("{hours}:{minutes:02}")
     }
 }
 
@@ -313,6 +313,29 @@ mod tests {
     fn formats_elapsed_duration() {
         let duration = Duration::from_secs(3 * 3600 + 12 * 60 + 7);
         assert_eq!(format_duration(duration, true), "3h 12m 7s");
+        assert_eq!(format_duration(duration, false), "3:12");
+        assert_eq!(
+            format_duration(Duration::from_secs(3600 + 60), false),
+            "1:01"
+        );
+    }
+
+    #[test]
+    fn includes_play_pause_icon_for_running_and_paused_states() {
+        let paused = AppState {
+            elapsed: Duration::from_secs(3600 + 60),
+            manually_paused: true,
+            ..AppState::default()
+        };
+        assert_eq!(status_title(&paused), "⏸ 1:01");
+
+        let running = AppState {
+            elapsed: Duration::from_secs(3600 + 60),
+            wallpaper_name: Some("dgnfog.png".to_string()),
+            lid_state: Some(LidState::Open),
+            ..AppState::default()
+        };
+        assert_eq!(status_title(&running), "▶ 1:01");
     }
 
     #[test]
