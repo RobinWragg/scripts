@@ -9,7 +9,7 @@ fi
 
 url="$1"
 downloads_dir="$HOME/Downloads"
-target_dir="/Volumes/main/server/docker/vid_storage/videos"
+target_dir="/Volumes/main/server/docker/vid_storage/media"
 
 tmp_output_file="$(mktemp)"
 yt-dlp --no-playlist -P "$downloads_dir" -S +height:800 --print after_move:filepath "$url" | tee "$tmp_output_file"

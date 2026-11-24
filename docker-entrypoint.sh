@@ -47,4 +47,7 @@ if [ -x "$ytdlp_path" ]; then
     fi
 fi
 
-exec /usr/local/bin/vid "$@" > "${channels_root}/log.txt" 2>&1
+/usr/local/bin/vid "$@" 2>&1 |
+    while IFS= read -r line; do
+        printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$line"
+    done > "${channels_root}/log.txt"

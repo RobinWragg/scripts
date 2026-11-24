@@ -1,10 +1,14 @@
+use chrono::DateTime;
 use curl;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use rss::Channel;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -19,6 +23,8 @@ pub struct VideoDetails {
 
 const CHANNELS_LIST_FILENAME: &str = "yt-channels.txt";
 const DOWNLOADED_LIST_FILENAME: &str = "yt-downloaded.txt";
+const PODCASTS_CHANNELS_LIST_FILENAME: &str = "podcasts-channels.txt";
+const PODCASTS_DOWNLOADED_LIST_FILENAME: &str = "podcasts-downloaded.txt";
 const YTDLP_JS_RUNTIMES_ENV: &str = "VID_YTDLP_JS_RUNTIMES";
 const ACCEPT_LANGUAGE_HEADER: &str = "Accept-Language: en-US,en;q=0.9";
 const ACCEPT_HEADER: &str =
@@ -188,6 +194,14 @@ fn downloaded_list_path() -> PathBuf {
     channels_root_path().join(DOWNLOADED_LIST_FILENAME)
 }
 
+fn podcasts_channels_list_path() -> PathBuf {
+    channels_root_path().join(PODCASTS_CHANNELS_LIST_FILENAME)
+}
+
+fn podcasts_downloaded_list_path() -> PathBuf {
+    channels_root_path().join(PODCASTS_DOWNLOADED_LIST_FILENAME)
+}
+
 fn channels_root_path() -> PathBuf {
     std::env::var("VID_CHANNELS_ROOT_PATH")
         .map(PathBuf::from)
@@ -195,7 +209,7 @@ fn channels_root_path() -> PathBuf {
 }
 
 fn download_root_path() -> PathBuf {
-    channels_root_path().join("videos")
+    channels_root_path().join("media")
 }
 
 fn count_directory_items(path: &Path) -> AppResult<usize> {
@@ -312,6 +326,35 @@ fn save_downloaded_video_ids(ids: &HashSet<String>) -> AppResult<()> {
     }
 
     fs::write(downloaded_list_path(), output)?;
+    Ok(())
+}
+
+fn load_downloaded_podcast_ids() -> AppResult<HashSet<String>> {
+    let path = podcasts_downloaded_list_path();
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+
+    let content = fs::read_to_string(&path)?;
+    Ok(content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect())
+}
+
+fn save_downloaded_podcast_ids(ids: &HashSet<String>) -> AppResult<()> {
+    let mut ids_sorted: Vec<&String> = ids.iter().collect();
+    ids_sorted.sort();
+
+    let mut output = String::new();
+    for id in ids_sorted {
+        output.push_str(id);
+        output.push('\n');
+    }
+
+    fs::write(podcasts_downloaded_list_path(), output)?;
     Ok(())
 }
 
@@ -433,6 +476,381 @@ fn is_scheduled_premiere_error(stderr: &str) -> bool {
         || stderr.contains("this live event will begin in")
 }
 
+#[derive(Clone, Debug)]
+struct PodcastEpisode {
+    id: String,
+    url: String,
+    title: String,
+    artist: String,
+    album: String,
+    published_timestamp: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AudioMetadata {
+    artist: Option<String>,
+    album: Option<String>,
+    title: Option<String>,
+}
+
+fn load_podcast_feed_urls() -> AppResult<Vec<String>> {
+    let path = podcasts_channels_list_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+
+    let content = fs::read_to_string(&path)?;
+    Ok(content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.to_string())
+        .collect())
+}
+
+fn fetch_podcast_feed(feed_url: &str) -> AppResult<String> {
+    let mut easy_curl = curl::easy::Easy::new();
+    easy_curl.follow_location(true)?;
+    let mut dst = Vec::new();
+
+    {
+        easy_curl.url(feed_url)?;
+        let mut transfer = easy_curl.transfer();
+        transfer.write_function(|data| {
+            dst.extend_from_slice(data);
+            Ok(data.len())
+        })?;
+        transfer.perform()?;
+    }
+
+    let response_code = easy_curl.response_code()?;
+    if response_code != 200 {
+        return Err(format!(
+            "Podcast feed request failed with HTTP status {}",
+            response_code
+        )
+        .into());
+    }
+
+    Ok(std::str::from_utf8(&dst)?.to_string())
+}
+
+fn get_podcast_episodes(feed_url: &str) -> AppResult<Vec<PodcastEpisode>> {
+    let feed = fetch_podcast_feed(feed_url)?;
+    let channel = Channel::read_from(BufReader::new(feed.as_bytes()))?;
+    let album = channel.title().trim();
+    let artist = channel.managing_editor().unwrap_or_else(|| "").trim();
+    let artist = if artist.is_empty() { album } else { artist };
+
+    let mut episodes = Vec::new();
+    for item in channel.items() {
+        let Some(enclosure) = item.enclosure() else {
+            continue;
+        };
+        let url = enclosure.url().trim();
+        if url.is_empty() {
+            continue;
+        }
+
+        let title = item
+            .title()
+            .map(|title| title.trim())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| enclosure_filename(url));
+        let episode_artist = item
+            .author()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(artist);
+        let id = item
+            .guid()
+            .map(|guid| guid.value().trim())
+            .filter(|guid| !guid.is_empty())
+            .unwrap_or(url)
+            .to_string();
+        let published_timestamp = item.pub_date().and_then(parse_podcast_timestamp);
+
+        episodes.push(PodcastEpisode {
+            id,
+            url: url.to_string(),
+            title: title.to_string(),
+            artist: episode_artist.to_string(),
+            album: album.to_string(),
+            published_timestamp,
+        });
+    }
+
+    sort_podcast_episodes(&mut episodes);
+    Ok(episodes)
+}
+
+fn parse_podcast_timestamp(pub_date: &str) -> Option<i64> {
+    DateTime::parse_from_rfc2822(pub_date)
+        .ok()
+        .map(|date| date.timestamp())
+}
+
+fn sort_podcast_episodes(episodes: &mut [PodcastEpisode]) {
+    episodes.sort_by_key(|episode| episode.published_timestamp.unwrap_or(i64::MAX));
+}
+
+fn enclosure_filename(url: &str) -> &str {
+    url.rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("untitled")
+}
+
+fn download_podcast_episode(
+    episode: &PodcastEpisode,
+    download_root: &Path,
+    skip_download: bool,
+) -> AppResult<bool> {
+    if skip_download {
+        println!("Skipping podcast download for {}", episode.id);
+        return Ok(true);
+    }
+
+    let source = tempfile::Builder::new()
+        .prefix(".podcast-")
+        .tempfile_in(download_root)?;
+    let output = source.path();
+
+    let download = Command::new("curl")
+        .arg("-fL")
+        .arg("--retry")
+        .arg("3")
+        .arg("-o")
+        .arg(output)
+        .arg(&episode.url)
+        .output();
+
+    match download {
+        Ok(result) if result.status.success() => {}
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            eprintln!("Podcast download failed for {}:", episode.id);
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr.trim());
+            } else if !stdout.trim().is_empty() {
+                eprintln!("{}", stdout.trim());
+            }
+            return Ok(false);
+        }
+        Err(e) => {
+            eprintln!("Failed to run curl for {}: {}", episode.id, e);
+            return Ok(false);
+        }
+    }
+
+    if source.as_file().metadata()?.len() == 0 {
+        eprintln!("Podcast download was empty for {}", episode.id);
+        return Ok(false);
+    }
+
+    let source_path = source.path().to_path_buf();
+    let metadata = probe_audio_metadata(&source_path).unwrap_or_default();
+    let artist = metadata
+        .artist
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| episode.artist.clone());
+    let album = metadata
+        .album
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| episode.album.clone());
+    let title = metadata
+        .title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| episode.title.clone());
+
+    let output_filename = podcast_output_filename(&artist, &title);
+    let output_path = download_root.join(output_filename);
+
+    let has_artwork = probe_attached_artwork(&source_path).unwrap_or(false);
+    let mut ffmpeg = Command::new("ffmpeg");
+    ffmpeg.arg("-y").arg("-v").arg("error");
+
+    if has_artwork {
+        ffmpeg
+            .arg("-i")
+            .arg(&source_path)
+            .arg("-map")
+            .arg("0:a:0")
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map_metadata")
+            .arg("0")
+            .arg("-c")
+            .arg("copy")
+            .arg("-disposition:v:0")
+            .arg("attached_pic");
+    } else {
+        ffmpeg
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("color=c=black:s=320x180:r=1")
+            .arg("-i")
+            .arg(&source_path)
+            .arg("-map")
+            .arg("1:a:0")
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map_metadata")
+            .arg("1")
+            .arg("-c:a")
+            .arg("copy")
+            .arg("-c:v")
+            .arg("mpeg4")
+            .arg("-q:v")
+            .arg("2")
+            .arg("-shortest");
+    }
+
+    let result = ffmpeg
+        .arg("-metadata")
+        .arg(format!("artist={}", artist))
+        .arg("-metadata")
+        .arg(format!("album={}", album))
+        .arg("-metadata")
+        .arg(format!("title={}", title))
+        .arg(&output_path)
+        .output();
+
+    match result {
+        Ok(result) if result.status.success() => {
+            println!("Remuxed podcast episode to {}", output_path.display());
+            Ok(true)
+        }
+        Ok(result) => {
+            let _ = fs::remove_file(&output_path);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            eprintln!("ffmpeg remux failed for {}:\n{}", episode.id, stderr.trim());
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&output_path);
+            eprintln!("Failed to run ffmpeg for {}: {}", episode.id, e);
+            Ok(false)
+        }
+    }
+}
+
+fn sanitize_filename_component(value: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            sanitized.push('_');
+        } else {
+            sanitized.push(ch);
+        }
+    }
+
+    let sanitized = sanitized.trim().trim_end_matches('.').trim().to_string();
+    if sanitized.is_empty() {
+        "Unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn podcast_output_filename(artist: &str, title: &str) -> String {
+    format!(
+        "{} - {}.mkv",
+        sanitize_filename_component(artist),
+        sanitize_filename_component(title)
+    )
+}
+
+fn probe_audio_metadata(source_path: &Path) -> AppResult<AudioMetadata> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format_tags=artist,album,title:stream_tags=artist,album,title")
+        .arg("-of")
+        .arg("json")
+        .arg(source_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(AudioMetadata::default());
+    }
+
+    let value: JsonValue = serde_json::from_slice(&output.stdout)?;
+    let mut metadata = AudioMetadata::default();
+
+    if let Some(format) = value.get("format") {
+        if let Some(tags) = format.get("tags") {
+            metadata.artist = json_tag(tags, "artist");
+            metadata.album = json_tag(tags, "album");
+            metadata.title = json_tag(tags, "title");
+        }
+    }
+
+    if let Some(streams) = value.get("streams").and_then(JsonValue::as_array) {
+        for stream in streams {
+            let Some(tags) = stream.get("tags") else {
+                continue;
+            };
+            if metadata.artist.is_none() {
+                metadata.artist = json_tag(tags, "artist");
+            }
+            if metadata.album.is_none() {
+                metadata.album = json_tag(tags, "album");
+            }
+            if metadata.title.is_none() {
+                metadata.title = json_tag(tags, "title");
+            }
+        }
+    }
+
+    Ok(metadata)
+}
+
+fn json_tag(tags: &JsonValue, name: &str) -> Option<String> {
+    let object = tags.as_object()?;
+    object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn probe_attached_artwork(source_path: &Path) -> AppResult<bool> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v")
+        .arg("-show_entries")
+        .arg("stream=index:stream_disposition=attached_pic")
+        .arg("-of")
+        .arg("json")
+        .arg(source_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let value: JsonValue = serde_json::from_slice(&output.stdout)?;
+    let Some(streams) = value.get("streams").and_then(JsonValue::as_array) else {
+        return Ok(false);
+    };
+
+    Ok(streams.iter().any(|stream| {
+        stream
+            .get("disposition")
+            .and_then(|disposition| disposition.get("attached_pic"))
+            .and_then(JsonValue::as_i64)
+            == Some(1)
+    }))
+}
+
 fn main() {
     println!("vid main() running");
     let download_root = download_root_path();
@@ -464,6 +882,7 @@ fn main() {
 
     for channel in channels {
         println!("Channel: {}", channel.channel_id);
+        let mut downloaded_for_channel = false;
 
         let videos = match get_channel_videos(&channel.channel_id) {
             Ok(videos) => videos,
@@ -502,6 +921,7 @@ fn main() {
                     downloaded_videos.insert(video.video_id.clone());
                     save_downloaded_video_ids(&downloaded_videos)
                         .expect("Failed to save downloaded video IDs");
+                    downloaded_for_channel = true;
                 }
                 Ok(false) => {
                     eprintln!("yt-dlp failed for {}", video.video_id);
@@ -510,8 +930,67 @@ fn main() {
                     eprintln!("Failed to run yt-dlp for {}: {}", video.video_id, e);
                 }
             }
+
+            if downloaded_for_channel {
+                break;
+            }
         }
         println!();
+    }
+
+    if !skip_downloads_due_to_root_size {
+        let podcast_feeds = load_podcast_feed_urls().expect("Failed to load podcast feeds");
+        let mut downloaded_podcasts =
+            load_downloaded_podcast_ids().expect("Failed to load downloaded podcast IDs");
+
+        for feed_url in podcast_feeds {
+            println!("Podcast feed: {}", feed_url);
+            let mut downloaded_for_feed = false;
+            let episodes = match get_podcast_episodes(&feed_url) {
+                Ok(episodes) => episodes,
+                Err(e) => {
+                    eprintln!("Failed to get podcast episodes for {}: {}", feed_url, e);
+                    println!();
+                    continue;
+                }
+            };
+
+            println!("Found {} podcast episodes", episodes.len());
+            for episode in &episodes {
+                if downloaded_podcasts.contains(&episode.id) {
+                    continue;
+                }
+
+                println!(
+                    "Downloading podcast episode {} - {}",
+                    episode.id, episode.title
+                );
+                match download_podcast_episode(episode, download_root.as_path(), skip_downloads) {
+                    Ok(true) => {
+                        downloaded_podcasts.insert(episode.id.clone());
+                        save_downloaded_podcast_ids(&downloaded_podcasts)
+                            .expect("Failed to save downloaded podcast IDs");
+                        downloaded_for_feed = true;
+                    }
+                    Ok(false) => {
+                        eprintln!("Podcast download/remux failed for {}", episode.id);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to process podcast {}: {}", episode.id, e);
+                    }
+                }
+
+                if downloaded_for_feed {
+                    break;
+                }
+            }
+            println!();
+        }
+
+        println!(
+            "Synced downloaded podcast IDs: {} entries",
+            downloaded_podcasts.len()
+        );
     }
 
     println!("Synced downloaded IDs: {} entries", downloaded_videos.len());
@@ -546,5 +1025,66 @@ mod tests {
         assert_eq!(video.video_id, "abc123");
         assert_eq!(video.channel_id, "mychannel");
         assert_eq!(video.title, "Example title");
+    }
+
+    #[test]
+    fn test_sanitize_filename_component() {
+        assert_eq!(
+            sanitize_filename_component("  artist:name  "),
+            "artist_name"
+        );
+        assert_eq!(sanitize_filename_component(""), "Unknown");
+    }
+
+    #[test]
+    fn test_podcast_filename_shape() {
+        let artist = sanitize_filename_component("Test Artist");
+        let title = sanitize_filename_component("Test Title");
+        assert_eq!(
+            podcast_output_filename(&artist, &title),
+            "Test Artist - Test Title.mkv"
+        );
+    }
+
+    #[test]
+    fn test_podcast_episodes_are_sorted_chronologically() {
+        let mut episodes = vec![
+            PodcastEpisode {
+                id: "new".to_string(),
+                url: "https://example.com/new.mp3".to_string(),
+                title: "New".to_string(),
+                artist: "Artist".to_string(),
+                album: "Feed".to_string(),
+                published_timestamp: Some(2),
+            },
+            PodcastEpisode {
+                id: "undated".to_string(),
+                url: "https://example.com/undated.mp3".to_string(),
+                title: "Undated".to_string(),
+                artist: "Artist".to_string(),
+                album: "Feed".to_string(),
+                published_timestamp: None,
+            },
+            PodcastEpisode {
+                id: "old".to_string(),
+                url: "https://example.com/old.mp3".to_string(),
+                title: "Old".to_string(),
+                artist: "Artist".to_string(),
+                album: "Feed".to_string(),
+                published_timestamp: Some(1),
+            },
+        ];
+
+        sort_podcast_episodes(&mut episodes);
+
+        assert_eq!(episodes[0].id, "old");
+        assert_eq!(episodes[1].id, "new");
+        assert_eq!(episodes[2].id, "undated");
+    }
+
+    #[test]
+    fn test_parse_podcast_timestamp() {
+        assert!(parse_podcast_timestamp("Tue, 24 Nov 2026 09:44:20 GMT").is_some());
+        assert!(parse_podcast_timestamp("not a date").is_none());
     }
 }
