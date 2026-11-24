@@ -58,15 +58,15 @@ fn lid_status(lid_state: Option<LidState>) -> &'static str {
     }
 }
 
-fn format_duration(duration: Duration, include_secs: bool) -> String {
+fn format_duration(duration: Duration, long_form: bool) -> String {
     let seconds = duration.as_secs();
     let hours = seconds / 3600;
     let minutes = (seconds / 60) % 60;
     let remaining_seconds = seconds % 60;
-    if include_secs {
+    if long_form {
         format!("{hours}h {minutes}m {remaining_seconds}s")
     } else {
-        format!("{hours}h {minutes}m")
+        format!("{hours}:{minutes}")
     }
 }
 
