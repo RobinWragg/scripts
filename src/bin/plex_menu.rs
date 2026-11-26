@@ -35,7 +35,13 @@ struct Track {
 struct PlaybackState {
     status: String,
     track: Option<Track>,
-    playlists: Vec<String>,
+    playlists: Vec<PlaylistMembership>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PlaylistMembership {
+    name: String,
+    included: bool,
 }
 
 fn parse_dotenv(contents: &str) -> HashMap<String, String> {
@@ -280,13 +286,39 @@ fn track_matches(track: &Track, playlist_track: &Track) -> bool {
             || normalized(&track.album) == normalized(&playlist_track.album))
 }
 
-fn find_playlists(config: &PlexConfig, track: &Track) -> Result<Vec<String>, String> {
+fn is_smart_playlist(playlist: &Value) -> bool {
+    match &playlist["smart"] {
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_i64() != Some(0),
+        Value::String(value) => {
+            let value = value.trim().to_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes")
+        }
+        _ => false,
+    }
+}
+
+fn find_playlists(config: &PlexConfig, track: &Track) -> Result<Vec<PlaylistMembership>, String> {
     let playlists = plex_get_json(config, "/playlists?playlistType=audio")?;
-    let mut matches = Vec::new();
+    let mut memberships: HashMap<String, PlaylistMembership> = HashMap::new();
 
     for playlist in metadata_array(&playlists) {
+        if is_smart_playlist(playlist) {
+            continue;
+        }
+
         let playlist_title = string_field(playlist, "title");
+        if playlist_title.is_empty() {
+            continue;
+        }
+
         let Some(rating_key) = playlist["ratingKey"].as_str() else {
+            memberships
+                .entry(normalized(&playlist_title))
+                .or_insert_with(|| PlaylistMembership {
+                    name: playlist_title,
+                    included: false,
+                });
             continue;
         };
 
@@ -294,22 +326,69 @@ fn find_playlists(config: &PlexConfig, track: &Track) -> Result<Vec<String>, Str
             Ok(items) => items,
             Err(error) => {
                 eprintln!("Failed to load Plex playlist {playlist_title:?}: {error}");
+                memberships
+                    .entry(normalized(&playlist_title))
+                    .or_insert_with(|| PlaylistMembership {
+                        name: playlist_title,
+                        included: false,
+                    });
                 continue;
             }
         };
 
-        if metadata_array(&items)
+        let included = metadata_array(&items)
             .iter()
             .map(track_from_metadata)
-            .any(|playlist_track| track_matches(track, &playlist_track))
-        {
-            matches.push(playlist_title);
-        }
+            .any(|playlist_track| track_matches(track, &playlist_track));
+
+        let key = normalized(&playlist_title);
+        memberships
+            .entry(key)
+            .and_modify(|membership| membership.included |= included)
+            .or_insert_with(|| PlaylistMembership {
+                name: playlist_title,
+                included,
+            });
     }
 
-    matches.sort_by_key(|name| name.to_lowercase());
-    matches.dedup();
-    Ok(matches)
+    let mut memberships: Vec<PlaylistMembership> = memberships.into_values().collect();
+    memberships.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(memberships)
+}
+
+fn playlist_menu_lines(playlists: &[PlaylistMembership]) -> Vec<String> {
+    playlists
+        .iter()
+        .map(|playlist| format!("{}={}", playlist.name, playlist.included))
+        .collect()
+}
+
+fn update_playlist_menu(
+    menu: &Menu,
+    header: &MenuItem,
+    membership_items: &mut Vec<MenuItem>,
+    playlists: &[PlaylistMembership],
+) {
+    for item in membership_items.iter() {
+        let _ = menu.remove(item);
+    }
+    membership_items.clear();
+
+    let lines = playlist_menu_lines(playlists);
+    if lines.is_empty() {
+        header.set_text("Playlists: none");
+        return;
+    }
+
+    header.set_text("Playlists:");
+    for (index, line) in lines.iter().enumerate() {
+        let item = MenuItem::new(line, false, None);
+        if let Err(error) = menu.insert(&item, 6 + index) {
+            eprintln!("Failed to add Plex playlist menu item: {error}");
+            continue;
+        }
+        membership_items.push(item);
+    }
 }
 
 fn poll_playback(config: &PlexConfig) -> PlaybackState {
@@ -390,6 +469,7 @@ fn main() {
     let status_item = MenuItem::with_id("status", "Status: Connecting", false, None);
     let playlists_item = MenuItem::with_id("playlists", "Playlists: none", false, None);
     let quit_item = MenuItem::with_id(QUIT_ITEM_ID, "Quit", true, None);
+    let mut playlist_membership_items = Vec::<MenuItem>::new();
 
     let menu = Menu::new();
     menu.append_items(&[
@@ -405,7 +485,7 @@ fn main() {
     .expect("failed to build the Plex Menu menu");
 
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu.clone()))
         .with_title("Plex")
         .with_tooltip("Plex Menu")
         .build()
@@ -451,16 +531,17 @@ fn main() {
                         &track.album
                     }
                 ));
-                playlists_item.set_text(if playback.playlists.is_empty() {
-                    "Playlists: none".to_owned()
-                } else {
-                    format!("Playlists: {}", playback.playlists.join(", "))
-                });
+                update_playlist_menu(
+                    &menu,
+                    &playlists_item,
+                    &mut playlist_membership_items,
+                    &playback.playlists,
+                );
             } else {
                 song_item.set_text("Song: none");
                 artist_item.set_text("Artist: unknown");
                 album_item.set_text("Album: unknown");
-                playlists_item.set_text("Playlists: none");
+                update_playlist_menu(&menu, &playlists_item, &mut playlist_membership_items, &[]);
             }
 
             status_item.set_text(format!("Status: {}", playback.status));
@@ -574,6 +655,39 @@ export PLEX_EXTRA=value
         };
 
         assert!(track_matches(&track, &playlist_track));
+    }
+
+    #[test]
+    fn identifies_smart_playlists() {
+        let smart_boolean: Value = serde_json::from_str(r#"{"smart": true}"#).unwrap();
+        let smart_string: Value = serde_json::from_str(r#"{"smart": "1"}"#).unwrap();
+        let regular_boolean: Value = serde_json::from_str(r#"{"smart": false}"#).unwrap();
+        let missing_smart_field: Value = serde_json::from_str(r#"{"title": "Road Trip"}"#).unwrap();
+
+        assert!(is_smart_playlist(&smart_boolean));
+        assert!(is_smart_playlist(&smart_string));
+        assert!(!is_smart_playlist(&regular_boolean));
+        assert!(!is_smart_playlist(&missing_smart_field));
+    }
+
+    #[test]
+    fn formats_all_playlist_memberships() {
+        let playlists = vec![
+            PlaylistMembership {
+                name: "Favorites".to_owned(),
+                included: true,
+            },
+            PlaylistMembership {
+                name: "Road Trip".to_owned(),
+                included: false,
+            },
+        ];
+
+        assert_eq!(
+            playlist_menu_lines(&playlists),
+            vec!["Favorites=true".to_owned(), "Road Trip=false".to_owned()]
+        );
+        assert!(playlist_menu_lines(&[]).is_empty());
     }
 
     #[test]
