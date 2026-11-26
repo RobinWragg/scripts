@@ -9,8 +9,13 @@ use serde_json::Value;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::TrayIconBuilder;
+
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSImage, NSMenu};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSInteger, NSSize, NSString};
 
 const QUIT_ITEM_ID: &str = "quit";
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -29,6 +34,7 @@ struct Track {
     title: String,
     artist: String,
     album: String,
+    user_rating: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -41,7 +47,9 @@ struct PlaybackState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PlaylistMembership {
     name: String,
+    playlist_rating_key: Option<String>,
     included: bool,
+    playlist_item_id: Option<String>,
 }
 
 fn parse_dotenv(contents: &str) -> HashMap<String, String> {
@@ -166,9 +174,16 @@ fn load_plex_config() -> PlexConfig {
 }
 
 fn plex_get_json(config: &PlexConfig, path: &str) -> Result<Value, String> {
+    let response = plex_request(config, path, "GET")?;
+    serde_json::from_slice(&response).map_err(|error| error.to_string())
+}
+
+fn plex_request(config: &PlexConfig, path: &str, method: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}{}", config.server_url, path);
     let mut easy = Easy::new();
     easy.url(&url).map_err(|error| error.to_string())?;
+    easy.custom_request(method)
+        .map_err(|error| error.to_string())?;
     easy.follow_location(true)
         .map_err(|error| error.to_string())?;
     easy.timeout(Duration::from_secs(4))
@@ -208,7 +223,7 @@ fn plex_get_json(config: &PlexConfig, path: &str) -> Result<Value, String> {
         return Err(format!("Plex returned HTTP {status}"));
     }
 
-    serde_json::from_slice(&response).map_err(|error| error.to_string())
+    Ok(response)
 }
 
 fn metadata_array(value: &Value) -> &[Value] {
@@ -219,15 +234,30 @@ fn metadata_array(value: &Value) -> &[Value] {
 }
 
 fn string_field(value: &Value, name: &str) -> String {
-    value[name].as_str().unwrap_or("").trim().to_owned()
+    match &value[name] {
+        Value::String(value) => value.trim().to_owned(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn track_from_metadata(value: &Value) -> Track {
+    let rating_key = string_field(value, "ratingKey");
+    let user_rating = match &value["userRating"] {
+        Value::Number(value) => value.as_f64().map(|rating| rating.round() as u8),
+        Value::String(value) => value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|rating| rating.round() as u8),
+        _ => None,
+    };
     Track {
-        rating_key: value["ratingKey"].as_str().map(str::to_owned),
+        rating_key: (!rating_key.is_empty()).then_some(rating_key),
         title: string_field(value, "title"),
         artist: string_field(value, "grandparentTitle"),
         album: string_field(value, "parentTitle"),
+        user_rating,
     }
 }
 
@@ -248,8 +278,7 @@ fn parse_active_track(value: &Value) -> Option<Track> {
     let track = sessions
         .iter()
         .copied()
-        .find(|session| session_is_playing(session))
-        .or_else(|| sessions.first().copied())?;
+        .find(|session| session_is_playing(session))?;
 
     let track = track_from_metadata(track);
     if track.title.is_empty() {
@@ -312,42 +341,59 @@ fn find_playlists(config: &PlexConfig, track: &Track) -> Result<Vec<PlaylistMemb
             continue;
         }
 
-        let Some(rating_key) = playlist["ratingKey"].as_str() else {
+        let playlist_rating_key = string_field(playlist, "ratingKey");
+        if playlist_rating_key.is_empty() {
             memberships
                 .entry(normalized(&playlist_title))
                 .or_insert_with(|| PlaylistMembership {
                     name: playlist_title,
+                    playlist_rating_key: None,
                     included: false,
+                    playlist_item_id: None,
                 });
             continue;
         };
 
-        let items = match plex_get_json(config, &format!("/playlists/{rating_key}/items")) {
-            Ok(items) => items,
-            Err(error) => {
-                eprintln!("Failed to load Plex playlist {playlist_title:?}: {error}");
-                memberships
-                    .entry(normalized(&playlist_title))
-                    .or_insert_with(|| PlaylistMembership {
-                        name: playlist_title,
-                        included: false,
-                    });
-                continue;
-            }
-        };
+        let items =
+            match plex_get_json(config, &format!("/playlists/{}/items", playlist_rating_key)) {
+                Ok(items) => items,
+                Err(error) => {
+                    eprintln!("Failed to load Plex playlist {playlist_title:?}: {error}");
+                    memberships
+                        .entry(normalized(&playlist_title))
+                        .or_insert_with(|| PlaylistMembership {
+                            name: playlist_title,
+                            playlist_rating_key: Some(playlist_rating_key.clone()),
+                            included: false,
+                            playlist_item_id: None,
+                        });
+                    continue;
+                }
+            };
 
-        let included = metadata_array(&items)
+        let playlist_item = metadata_array(&items)
             .iter()
-            .map(track_from_metadata)
-            .any(|playlist_track| track_matches(track, &playlist_track));
+            .find(|playlist_track| track_matches(track, &track_from_metadata(playlist_track)));
+        let included = playlist_item.is_some();
+        let playlist_item_id = playlist_item.and_then(|item| {
+            let item_id = string_field(item, "playlistItemID");
+            (!item_id.is_empty()).then_some(item_id)
+        });
 
         let key = normalized(&playlist_title);
         memberships
             .entry(key)
-            .and_modify(|membership| membership.included |= included)
+            .and_modify(|membership| {
+                membership.included |= included;
+                if playlist_item_id.is_some() {
+                    membership.playlist_item_id = playlist_item_id.clone();
+                }
+            })
             .or_insert_with(|| PlaylistMembership {
                 name: playlist_title,
+                playlist_rating_key: Some(playlist_rating_key),
                 included,
+                playlist_item_id,
             });
     }
 
@@ -356,11 +402,154 @@ fn find_playlists(config: &PlexConfig, track: &Track) -> Result<Vec<PlaylistMemb
     Ok(memberships)
 }
 
+fn percent_encode_query(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    encoded
+}
+
+fn add_track_to_playlist(
+    config: &PlexConfig,
+    track: &Track,
+    playlist_rating_key: &str,
+) -> Result<(), String> {
+    let track_rating_key = track
+        .rating_key
+        .as_deref()
+        .ok_or_else(|| "Active track has no rating key".to_owned())?;
+    let identity = plex_get_json(config, "/identity")?;
+    let machine_identifier = string_field(&identity["MediaContainer"], "machineIdentifier");
+    if machine_identifier.is_empty() {
+        return Err("Plex server identity has no machine identifier".to_owned());
+    }
+
+    let uri = format!(
+        "server://{machine_identifier}/com.plexapp.plugins.library/library/metadata/{track_rating_key}"
+    );
+    plex_request(
+        config,
+        &format!(
+            "/playlists/{playlist_rating_key}/items?uri={}",
+            percent_encode_query(&uri)
+        ),
+        "PUT",
+    )?;
+    Ok(())
+}
+
+fn remove_track_from_playlist(
+    config: &PlexConfig,
+    playlist_rating_key: &str,
+    playlist_item_id: &str,
+) -> Result<(), String> {
+    plex_request(
+        config,
+        &format!("/playlists/{playlist_rating_key}/items/{playlist_item_id}"),
+        "DELETE",
+    )?;
+    Ok(())
+}
+
+fn set_track_rating(config: &PlexConfig, track: &Track, rating: i16) -> Result<(), String> {
+    let track_rating_key = track
+        .rating_key
+        .as_deref()
+        .ok_or_else(|| "Active track has no rating key".to_owned())?;
+    plex_request(
+        config,
+        &format!(
+            "/:/rate?identifier=com.plexapp.plugins.library&key={track_rating_key}&rating={rating}"
+        ),
+        "PUT",
+    )?;
+    Ok(())
+}
+
+fn update_star_menu(
+    unrated: &CheckMenuItem,
+    one_star: &CheckMenuItem,
+    three_stars: &CheckMenuItem,
+    five_stars: &CheckMenuItem,
+    track: Option<&Track>,
+) {
+    let rating = track.and_then(|track| track.user_rating);
+    let selected_rating = selected_star_rating(rating);
+    unrated.set_checked(is_unrated_rating(rating));
+    one_star.set_checked(selected_rating == Some(2));
+    three_stars.set_checked(selected_rating == Some(6));
+    five_stars.set_checked(selected_rating == Some(10));
+
+    let enabled = track.is_some() && track.and_then(|track| track.rating_key.as_ref()).is_some();
+    unrated.set_enabled(enabled);
+    one_star.set_enabled(enabled);
+    three_stars.set_enabled(enabled);
+    five_stars.set_enabled(enabled);
+}
+
+fn selected_star_rating(rating: Option<u8>) -> Option<u8> {
+    match rating {
+        Some(2) => Some(2),
+        Some(6) => Some(6),
+        Some(10) => Some(10),
+        _ => None,
+    }
+}
+
+fn is_unrated_rating(rating: Option<u8>) -> bool {
+    rating.is_none() || rating == Some(0)
+}
+
+fn rating_after_update(rating: i16) -> Option<u8> {
+    (rating != -1).then_some(rating as u8)
+}
+
 fn playlist_menu_lines(playlists: &[PlaylistMembership]) -> Vec<String> {
     playlists
         .iter()
-        .map(|playlist| format!("{}={}", playlist.name, playlist.included))
+        .map(|playlist| {
+            format!(
+                "{}: {}",
+                playlist.name,
+                if playlist.included {
+                    "Added"
+                } else {
+                    "Removed"
+                }
+            )
+        })
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn set_playlist_laptop_symbol(menu: &Menu, position: usize) {
+    let symbol_name = NSString::from_str("laptopcomputer");
+    let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(&symbol_name, None);
+    let Some(symbol) = symbol else {
+        return;
+    };
+
+    symbol.setSize(NSSize::new(18.0, 18.0));
+
+    let ns_menu = menu.ns_menu();
+    if ns_menu.is_null() {
+        return;
+    }
+
+    let ns_menu = unsafe { &*(ns_menu as *const NSMenu) };
+    let item = ns_menu.itemAtIndex(position as NSInteger);
+    if let Some(item) = item {
+        item.setImage(Some(&symbol));
+    }
+}
+
+fn playlist_should_show_laptop_symbol(name: &str) -> bool {
+    name == "hacky hack"
 }
 
 fn update_playlist_menu(
@@ -382,10 +571,21 @@ fn update_playlist_menu(
 
     header.set_text("Playlists:");
     for (index, line) in lines.iter().enumerate() {
-        let item = MenuItem::new(line, false, None);
-        if let Err(error) = menu.insert(&item, 6 + index) {
+        let playlist = &playlists[index];
+        let item = match &playlist.playlist_rating_key {
+            Some(rating_key) => {
+                MenuItem::with_id(format!("playlist-toggle:{rating_key}"), line, true, None)
+            }
+            None => MenuItem::new(line, false, None),
+        };
+        let position = 11 + index;
+        if let Err(error) = menu.insert(&item, position) {
             eprintln!("Failed to add Plex playlist menu item: {error}");
             continue;
+        }
+        #[cfg(target_os = "macos")]
+        if playlist_should_show_laptop_symbol(&playlist.name) {
+            set_playlist_laptop_symbol(menu, position);
         }
         membership_items.push(item);
     }
@@ -467,6 +667,10 @@ fn main() {
     let artist_item = MenuItem::with_id("artist", "Artist: none", false, None);
     let album_item = MenuItem::with_id("album", "Album: none", false, None);
     let status_item = MenuItem::with_id("status", "Status: Connecting", false, None);
+    let unrated_item = CheckMenuItem::with_id("rating:-1", "-", false, false, None);
+    let one_star_item = CheckMenuItem::with_id("rating:2", "★", false, false, None);
+    let three_star_item = CheckMenuItem::with_id("rating:6", "★★★", false, false, None);
+    let five_star_item = CheckMenuItem::with_id("rating:10", "★★★★★", false, false, None);
     let playlists_item = MenuItem::with_id("playlists", "Playlists: none", false, None);
     let quit_item = MenuItem::with_id(QUIT_ITEM_ID, "Quit", true, None);
     let mut playlist_membership_items = Vec::<MenuItem>::new();
@@ -477,6 +681,11 @@ fn main() {
         &artist_item,
         &album_item,
         &status_item,
+        &PredefinedMenuItem::separator(),
+        &unrated_item,
+        &one_star_item,
+        &three_star_item,
+        &five_star_item,
         &PredefinedMenuItem::separator(),
         &playlists_item,
         &PredefinedMenuItem::separator(),
@@ -498,6 +707,119 @@ fn main() {
                 QUIT_ITEM_ID => {
                     stop.store(true, Ordering::Relaxed);
                     should_exit = true;
+                }
+                rating_id if rating_id.starts_with("rating:") => {
+                    if let Some(rating) = rating_id.strip_prefix("rating:") {
+                        if let Ok(rating) = rating.parse::<i16>() {
+                            if matches!(rating, -1 | 2 | 6 | 10) {
+                                let track = {
+                                    let playback = state.lock().unwrap();
+                                    playback.track.clone()
+                                };
+                                if let Some(track) = track {
+                                    let config = load_plex_config();
+                                    match set_track_rating(&config, &track, rating) {
+                                        Ok(()) => {
+                                            let mut playback = state.lock().unwrap();
+                                            playback.status = "Connected".to_owned();
+                                            if let Some(active_track) = playback.track.as_mut() {
+                                                active_track.user_rating =
+                                                    rating_after_update(rating);
+                                            }
+                                            let updated_track = playback.track.clone();
+                                            drop(playback);
+                                            update_star_menu(
+                                                &unrated_item,
+                                                &one_star_item,
+                                                &three_star_item,
+                                                &five_star_item,
+                                                updated_track.as_ref(),
+                                            );
+                                            status_item.set_text("Status: Connected");
+                                        }
+                                        Err(error) => {
+                                            let mut playback = state.lock().unwrap();
+                                            playback.status =
+                                                format!("Rating update failed: {error}");
+                                            drop(playback);
+                                            status_item.set_text(format!(
+                                                "Status: Rating update failed: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                playlist_id if playlist_id.starts_with("playlist-toggle:") => {
+                    if let Some(rating_key) = playlist_id.strip_prefix("playlist-toggle:") {
+                        let snapshot = {
+                            let playback = state.lock().unwrap();
+                            playback.track.clone().and_then(|track| {
+                                playback
+                                    .playlists
+                                    .iter()
+                                    .find(|playlist| {
+                                        playlist.playlist_rating_key.as_deref() == Some(rating_key)
+                                    })
+                                    .cloned()
+                                    .map(|playlist| (track, playlist))
+                            })
+                        };
+
+                        if let Some((track, playlist)) = snapshot {
+                            let config = load_plex_config();
+                            let result = if playlist.included {
+                                match playlist.playlist_item_id.as_deref() {
+                                    Some(item_id) => {
+                                        remove_track_from_playlist(&config, rating_key, item_id)
+                                    }
+                                    None => {
+                                        Err("Plex did not provide this playlist item ID".to_owned())
+                                    }
+                                }
+                            } else {
+                                add_track_to_playlist(&config, &track, rating_key)
+                            };
+
+                            match result {
+                                Ok(()) => {
+                                    let mut playback = state.lock().unwrap();
+                                    playback.status = "Connected".to_owned();
+                                    if let Some(membership) =
+                                        playback.playlists.iter_mut().find(|membership| {
+                                            membership.playlist_rating_key.as_deref()
+                                                == Some(rating_key)
+                                        })
+                                    {
+                                        membership.included = !membership.included;
+                                        if !membership.included {
+                                            membership.playlist_item_id = None;
+                                        }
+                                    }
+                                    let updated_playlists = playback.playlists.clone();
+                                    drop(playback);
+
+                                    update_playlist_menu(
+                                        &menu,
+                                        &playlists_item,
+                                        &mut playlist_membership_items,
+                                        &updated_playlists,
+                                    );
+                                    status_item.set_text("Status: Connected");
+                                }
+                                Err(error) => {
+                                    let mut playback = state.lock().unwrap();
+                                    playback.status = format!("Playlist update failed: {error}");
+                                    drop(playback);
+                                    status_item.set_text(format!(
+                                        "Status: Playlist update failed: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -537,11 +859,25 @@ fn main() {
                     &mut playlist_membership_items,
                     &playback.playlists,
                 );
+                update_star_menu(
+                    &unrated_item,
+                    &one_star_item,
+                    &three_star_item,
+                    &five_star_item,
+                    playback.track.as_ref(),
+                );
             } else {
                 song_item.set_text("Song: none");
                 artist_item.set_text("Artist: unknown");
                 album_item.set_text("Album: unknown");
                 update_playlist_menu(&menu, &playlists_item, &mut playlist_membership_items, &[]);
+                update_star_menu(
+                    &unrated_item,
+                    &one_star_item,
+                    &three_star_item,
+                    &five_star_item,
+                    None,
+                );
             }
 
             status_item.set_text(format!("Status: {}", playback.status));
@@ -603,6 +939,7 @@ export PLEX_EXTRA=value
                   "title": "Song",
                   "grandparentTitle": "Artist",
                   "parentTitle": "Album",
+                  "userRating": 6,
                   "Player": {"state": "playing"}
                 }]
               }
@@ -617,8 +954,51 @@ export PLEX_EXTRA=value
                 title: "Song".to_owned(),
                 artist: "Artist".to_owned(),
                 album: "Album".to_owned(),
+                user_rating: Some(6),
             })
         );
+    }
+
+    #[test]
+    fn ignores_paused_tracks() {
+        let json: Value = serde_json::from_str(
+            r#"{
+              "MediaContainer": {
+                "Metadata": [{
+                  "type": "track",
+                  "ratingKey": "456",
+                  "title": "Paused Song",
+                  "grandparentTitle": "Paused Artist",
+                  "parentTitle": "Paused Album",
+                  "Player": {"state": "paused"}
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parse_active_track(&json), None);
+    }
+
+    #[test]
+    fn ignores_stopped_or_stale_sessions() {
+        let json: Value = serde_json::from_str(
+            r#"{
+              "MediaContainer": {
+                "Metadata": [{
+                  "type": "track",
+                  "ratingKey": "789",
+                  "title": "Old Song",
+                  "grandparentTitle": "Old Artist",
+                  "parentTitle": "Old Album",
+                  "Player": {"state": "stopped"}
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parse_active_track(&json), None);
     }
 
     #[test]
@@ -628,12 +1008,14 @@ export PLEX_EXTRA=value
             title: "Other title".to_owned(),
             artist: "Other artist".to_owned(),
             album: "Other album".to_owned(),
+            user_rating: None,
         };
         let playlist_track = Track {
             rating_key: Some("123".to_owned()),
             title: "Different metadata title".to_owned(),
             artist: String::new(),
             album: String::new(),
+            user_rating: None,
         };
 
         assert!(track_matches(&track, &playlist_track));
@@ -646,12 +1028,14 @@ export PLEX_EXTRA=value
             title: "My Song".to_owned(),
             artist: "The Artist".to_owned(),
             album: "The Album".to_owned(),
+            user_rating: None,
         };
         let playlist_track = Track {
             rating_key: None,
             title: "my song".to_owned(),
             artist: "the artist".to_owned(),
             album: "the album".to_owned(),
+            user_rating: None,
         };
 
         assert!(track_matches(&track, &playlist_track));
@@ -675,19 +1059,48 @@ export PLEX_EXTRA=value
         let playlists = vec![
             PlaylistMembership {
                 name: "Favorites".to_owned(),
+                playlist_rating_key: Some("1".to_owned()),
                 included: true,
+                playlist_item_id: Some("10".to_owned()),
             },
             PlaylistMembership {
                 name: "Road Trip".to_owned(),
+                playlist_rating_key: Some("2".to_owned()),
                 included: false,
+                playlist_item_id: None,
             },
         ];
 
         assert_eq!(
             playlist_menu_lines(&playlists),
-            vec!["Favorites=true".to_owned(), "Road Trip=false".to_owned()]
+            vec![
+                "Favorites: Added".to_owned(),
+                "Road Trip: Removed".to_owned()
+            ]
         );
         assert!(playlist_menu_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn shows_laptop_symbol_only_for_hacky_hack() {
+        assert!(playlist_should_show_laptop_symbol("hacky hack"));
+        assert!(!playlist_should_show_laptop_symbol("Hacky Hack"));
+        assert!(!playlist_should_show_laptop_symbol("Favorites"));
+    }
+
+    #[test]
+    fn maps_supported_plex_star_ratings() {
+        assert_eq!(selected_star_rating(Some(2)), Some(2));
+        assert_eq!(selected_star_rating(Some(6)), Some(6));
+        assert_eq!(selected_star_rating(Some(10)), Some(10));
+        assert_eq!(selected_star_rating(Some(4)), None);
+        assert_eq!(selected_star_rating(Some(0)), None);
+        assert_eq!(selected_star_rating(None), None);
+        assert!(is_unrated_rating(Some(0)));
+        assert!(is_unrated_rating(None));
+        assert!(!is_unrated_rating(Some(2)));
+        assert_eq!(rating_after_update(-1), None);
+        assert_eq!(rating_after_update(2), Some(2));
     }
 
     #[test]

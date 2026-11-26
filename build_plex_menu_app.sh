@@ -27,4 +27,8 @@ mkdir -p "$macos_dir"
 cp "$cargo_dir/plex_menu" "$macos_dir/plex_menu"
 cp packaging/plex-menu/Info.plist "$contents_dir/Info.plist"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+	codesign --force --deep --sign - "$app_dir"
+fi
+
 printf 'Built %s\n' "$app_dir"
