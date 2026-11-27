@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
 use curl::easy::{Easy, List};
 use serde_json::Value;
 use tao::event::{Event, StartCause};
@@ -15,9 +19,15 @@ use tray_icon::TrayIconBuilder;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSFont, NSFontAttributeName, NSImage, NSMenu, NSStringDrawing};
+use objc2_app_kit::{
+    NSFont, NSFontAttributeName, NSImage, NSMenu, NSMenuDidBeginTrackingNotification,
+    NSMenuDidEndTrackingNotification, NSStringDrawing,
+};
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSInteger, NSSize, NSString};
+use objc2_foundation::{
+    NSAttributedStringKey, NSDictionary, NSInteger, NSNotification, NSNotificationCenter, NSSize,
+    NSString,
+};
 
 const QUIT_ITEM_ID: &str = "quit";
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -495,6 +505,68 @@ fn update_star_menu(
     five_stars.set_enabled(enabled);
 }
 
+fn refresh_menu_contents(
+    menu: &Menu,
+    song_item: &MenuItem,
+    artist_item: &MenuItem,
+    album_item: &MenuItem,
+    status_item: &MenuItem,
+    unrated_item: &CheckMenuItem,
+    one_star_item: &CheckMenuItem,
+    three_star_item: &CheckMenuItem,
+    five_star_item: &CheckMenuItem,
+    playlists_item: &MenuItem,
+    playlist_membership_items: &mut Vec<MenuItem>,
+    playback: &PlaybackState,
+) {
+    if let Some(track) = &playback.track {
+        song_item.set_text(format!("Song: {}", track.title));
+        artist_item.set_text(format!(
+            "Artist: {}",
+            if track.artist.is_empty() {
+                "unknown"
+            } else {
+                &track.artist
+            }
+        ));
+        album_item.set_text(format!(
+            "Album: {}",
+            if track.album.is_empty() {
+                "unknown"
+            } else {
+                &track.album
+            }
+        ));
+        update_playlist_menu(
+            menu,
+            playlists_item,
+            playlist_membership_items,
+            &playback.playlists,
+        );
+        update_star_menu(
+            unrated_item,
+            one_star_item,
+            three_star_item,
+            five_star_item,
+            Some(track),
+        );
+    } else {
+        song_item.set_text("Song: none");
+        artist_item.set_text("Artist: unknown");
+        album_item.set_text("Album: unknown");
+        update_playlist_menu(menu, playlists_item, playlist_membership_items, &[]);
+        update_star_menu(
+            unrated_item,
+            one_star_item,
+            three_star_item,
+            five_star_item,
+            None,
+        );
+    }
+
+    status_item.set_text(format!("Status: {}", playback.status));
+}
+
 fn selected_star_rating(rating: Option<u8>) -> Option<u8> {
     match rating {
         Some(2) => Some(2),
@@ -633,6 +705,15 @@ fn menu_bar_title(playback: &PlaybackState) -> String {
         Some(track) => truncate_to_menu_bar_width(&track.title),
         None => "Plex".to_owned(),
     }
+}
+
+fn should_update_menu(
+    last_playback: Option<&PlaybackState>,
+    playback: &PlaybackState,
+    menu_is_open: bool,
+    refresh_after_close: bool,
+) -> bool {
+    !menu_is_open && (refresh_after_close || last_playback != Some(playback))
 }
 
 fn truncate_by_width<F>(value: &str, max_width: f64, measure: F) -> String
@@ -807,9 +888,49 @@ fn main() {
         .build()
         .expect("failed to create the macOS menu bar item");
 
+    let menu_is_open = Arc::new(AtomicBool::new(false));
+    let menu_needs_refresh = Arc::new(AtomicBool::new(false));
+    let notification_center = NSNotificationCenter::defaultCenter();
+
+    let begin_name = unsafe { NSMenuDidBeginTrackingNotification };
+    let begin_menu_observer = {
+        let menu_is_open = Arc::clone(&menu_is_open);
+        let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+            menu_is_open.store(true, Ordering::Relaxed);
+        });
+        unsafe {
+            notification_center.addObserverForName_object_queue_usingBlock(
+                Some(begin_name),
+                None,
+                None,
+                &block,
+            )
+        }
+    };
+
+    let end_name = unsafe { NSMenuDidEndTrackingNotification };
+    let end_menu_observer = {
+        let menu_is_open = Arc::clone(&menu_is_open);
+        let menu_needs_refresh = Arc::clone(&menu_needs_refresh);
+        let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+            menu_is_open.store(false, Ordering::Relaxed);
+            menu_needs_refresh.store(true, Ordering::Relaxed);
+        });
+        unsafe {
+            notification_center.addObserverForName_object_queue_usingBlock(
+                Some(end_name),
+                None,
+                None,
+                &block,
+            )
+        }
+    };
+    let menu_observers = (begin_menu_observer, end_menu_observer);
+
     let mut should_exit = false;
-    let mut last_menu_bar_title: Option<String> = None;
+    let mut last_rendered_playback: Option<PlaybackState> = None;
     event_loop.run(move |_event, _event_loop, control_flow| {
+        let _menu_observers = &menu_observers;
         while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             match menu_event.id().as_ref() {
                 QUIT_ITEM_ID => {
@@ -834,27 +955,14 @@ fn main() {
                                                 active_track.user_rating =
                                                     rating_after_update(rating);
                                             }
-                                            let updated_track = playback.track.clone();
-                                            drop(playback);
-                                            update_star_menu(
-                                                &unrated_item,
-                                                &one_star_item,
-                                                &three_star_item,
-                                                &five_star_item,
-                                                updated_track.as_ref(),
-                                            );
-                                            status_item.set_text("Status: Connected");
                                         }
                                         Err(error) => {
                                             let mut playback = state.lock().unwrap();
                                             playback.status =
                                                 format!("Rating update failed: {error}");
-                                            drop(playback);
-                                            status_item.set_text(format!(
-                                                "Status: Rating update failed: {error}"
-                                            ));
                                         }
                                     }
+                                    menu_needs_refresh.store(true, Ordering::Relaxed);
                                 }
                             }
                         }
@@ -906,26 +1014,13 @@ fn main() {
                                             membership.playlist_item_id = None;
                                         }
                                     }
-                                    let updated_playlists = playback.playlists.clone();
-                                    drop(playback);
-
-                                    update_playlist_menu(
-                                        &menu,
-                                        &playlists_item,
-                                        &mut playlist_membership_items,
-                                        &updated_playlists,
-                                    );
-                                    status_item.set_text("Status: Connected");
                                 }
                                 Err(error) => {
                                     let mut playback = state.lock().unwrap();
                                     playback.status = format!("Playlist update failed: {error}");
-                                    drop(playback);
-                                    status_item.set_text(format!(
-                                        "Status: Playlist update failed: {error}"
-                                    ));
                                 }
                             }
+                            menu_needs_refresh.store(true, Ordering::Relaxed);
                         }
                     }
                 }
@@ -942,72 +1037,50 @@ fn main() {
             )
         {
             let playback = state.lock().unwrap().clone();
-
-            if let Some(track) = &playback.track {
-                song_item.set_text(format!("Song: {}", track.title));
-                artist_item.set_text(format!(
-                    "Artist: {}",
-                    if track.artist.is_empty() {
-                        "unknown"
-                    } else {
-                        &track.artist
-                    }
-                ));
-                album_item.set_text(format!(
-                    "Album: {}",
-                    if track.album.is_empty() {
-                        "unknown"
-                    } else {
-                        &track.album
-                    }
-                ));
-                update_playlist_menu(
+            let menu_is_open = menu_is_open.load(Ordering::Relaxed);
+            let refresh_after_close = if menu_is_open {
+                false
+            } else {
+                menu_needs_refresh.swap(false, Ordering::Relaxed)
+            };
+            if should_update_menu(
+                last_rendered_playback.as_ref(),
+                &playback,
+                menu_is_open,
+                refresh_after_close,
+            ) {
+                refresh_menu_contents(
                     &menu,
+                    &song_item,
+                    &artist_item,
+                    &album_item,
+                    &status_item,
+                    &unrated_item,
+                    &one_star_item,
+                    &three_star_item,
+                    &five_star_item,
                     &playlists_item,
                     &mut playlist_membership_items,
-                    &playback.playlists,
+                    &playback,
                 );
-                update_star_menu(
-                    &unrated_item,
-                    &one_star_item,
-                    &three_star_item,
-                    &five_star_item,
-                    playback.track.as_ref(),
-                );
-            } else {
-                song_item.set_text("Song: none");
-                artist_item.set_text("Artist: unknown");
-                album_item.set_text("Album: unknown");
-                update_playlist_menu(&menu, &playlists_item, &mut playlist_membership_items, &[]);
-                update_star_menu(
-                    &unrated_item,
-                    &one_star_item,
-                    &three_star_item,
-                    &five_star_item,
-                    None,
-                );
-            }
-
-            status_item.set_text(format!("Status: {}", playback.status));
-            let menu_bar_title = menu_bar_title(&playback);
-            if last_menu_bar_title.as_deref() != Some(menu_bar_title.as_str()) {
+                let menu_bar_title = menu_bar_title(&playback);
                 print_text_diagnostics("menu bar title before set_title", &menu_bar_title);
-                last_menu_bar_title = Some(menu_bar_title.clone());
+                tray.set_title(Some(menu_bar_title));
+                let tooltip = match &playback.track {
+                    Some(track) => format!(
+                        "Plex Menu — {} — {}",
+                        track.title,
+                        if track.artist.is_empty() {
+                            "unknown artist"
+                        } else {
+                            &track.artist
+                        }
+                    ),
+                    None => "Plex Menu".to_owned(),
+                };
+                let _ = tray.set_tooltip(Some(tooltip));
+                last_rendered_playback = Some(playback);
             }
-            tray.set_title(Some(menu_bar_title));
-            let tooltip = match &playback.track {
-                Some(track) => format!(
-                    "Plex Menu — {} — {}",
-                    track.title,
-                    if track.artist.is_empty() {
-                        "unknown artist"
-                    } else {
-                        &track.artist
-                    }
-                ),
-                None => "Plex Menu".to_owned(),
-            };
-            let _ = tray.set_tooltip(Some(tooltip));
         }
 
         if should_exit {
@@ -1225,5 +1298,27 @@ export PLEX_EXTRA=value
             truncate_by_width("A very long song title", 10.0, measure),
             "A very ..."
         );
+    }
+
+    #[test]
+    fn only_updates_menu_for_changed_playback_when_closed() {
+        let playback = PlaybackState {
+            status: "Connected".to_owned(),
+            track: Some(Track {
+                title: "A Song".to_owned(),
+                ..Track::default()
+            }),
+            playlists: Vec::new(),
+        };
+
+        assert!(should_update_menu(None, &playback, false, false));
+        assert!(!should_update_menu(
+            Some(&playback),
+            &playback,
+            false,
+            false
+        ));
+        assert!(should_update_menu(Some(&playback), &playback, false, true));
+        assert!(!should_update_menu(None, &playback, true, false));
     }
 }
