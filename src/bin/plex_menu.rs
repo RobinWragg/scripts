@@ -13,14 +13,17 @@ use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, Pre
 use tray_icon::TrayIconBuilder;
 
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSImage, NSMenu};
+use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSInteger, NSSize, NSString};
+use objc2_app_kit::{NSFont, NSFontAttributeName, NSImage, NSMenu, NSStringDrawing};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSInteger, NSSize, NSString};
 
 const QUIT_ITEM_ID: &str = "quit";
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const UI_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:32400";
+const MENU_BAR_TITLE_MAX_WIDTH: f64 = 150.0;
 
 #[derive(Clone, Default)]
 struct PlexConfig {
@@ -627,19 +630,90 @@ fn poll_playback(config: &PlexConfig) -> PlaybackState {
 
 fn menu_bar_title(playback: &PlaybackState) -> String {
     match &playback.track {
-        Some(track) => truncate_chars(&track.title, 45),
+        Some(track) => truncate_to_menu_bar_width(&track.title),
         None => "Plex".to_owned(),
     }
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let prefix: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
+fn truncate_by_width<F>(value: &str, max_width: f64, measure: F) -> String
+where
+    F: Fn(&str) -> f64,
+{
+    if measure(value) <= max_width {
+        return value.to_owned();
     }
+
+    const ELLIPSIS: &str = "...";
+    let ellipsis_width = measure(ELLIPSIS);
+    if ellipsis_width >= max_width {
+        return ELLIPSIS.to_owned();
+    }
+
+    let available_width = max_width - ellipsis_width;
+    let mut prefix = String::new();
+    for character in value.chars() {
+        let mut candidate = prefix.clone();
+        candidate.push(character);
+        if measure(&candidate) > available_width {
+            break;
+        }
+        prefix = candidate;
+    }
+
+    format!("{prefix}{ELLIPSIS}")
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_text_width(value: &str) -> f64 {
+    let ns_value = NSString::from_str(value);
+    let font = NSFont::menuBarFontOfSize(0.0);
+    let font_object = font.into_super().into_super();
+    let font_attribute_name = unsafe { NSFontAttributeName };
+    let attributes = NSDictionary::<NSAttributedStringKey, AnyObject>::from_retained_objects(
+        &[font_attribute_name],
+        &[font_object],
+    );
+
+    unsafe { ns_value.sizeWithAttributes(Some(&attributes)).width }
+}
+
+fn truncate_to_menu_bar_width(value: &str) -> String {
+    truncate_by_width(value, MENU_BAR_TITLE_MAX_WIDTH, menu_bar_text_width)
+}
+
+fn print_text_diagnostics(label: &str, value: &str) {
+    let suspicious_characters: Vec<String> = value
+        .chars()
+        .filter(|character| {
+            character.is_control()
+                || matches!(character, '\u{fffd}')
+                || (*character as u32) == 0x2028
+                || (*character as u32) == 0x2029
+                || (*character as u32) == 0x202a
+                || (*character as u32) == 0x202b
+                || (*character as u32) == 0x202c
+                || (*character as u32) == 0x202d
+                || (*character as u32) == 0x202e
+                || (*character as u32) == 0x2066
+                || (*character as u32) == 0x2067
+                || (*character as u32) == 0x2068
+                || (*character as u32) == 0x2069
+        })
+        .map(|character| format!("U+{:04X}", character as u32))
+        .collect();
+    let byte_hex: String = value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<String>>()
+        .join(" ");
+
+    println!(
+        "[plex_menu] {label}: debug={value:?}, chars={}, bytes={}, suspicious_chars={:?}, byte_hex={byte_hex}",
+        value.chars().count(),
+        value.len(),
+        suspicious_characters,
+    );
 }
 
 fn main() {
@@ -652,8 +726,41 @@ fn main() {
     let worker_state = Arc::clone(&state);
     let worker_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
+        let mut previous_status: Option<String> = None;
+        let mut previous_track: Option<Track> = None;
         while !worker_stop.load(Ordering::Relaxed) {
             let playback = poll_playback(&load_plex_config());
+            let changed = previous_status.as_deref() != Some(playback.status.as_str())
+                || previous_track.as_ref() != playback.track.as_ref();
+            if changed {
+                println!(
+                    "[plex_menu] playback changed: status={:?}, track={:?}",
+                    playback.status, playback.track
+                );
+                if let Some(track) = &playback.track {
+                    print_text_diagnostics("active title", &track.title);
+                    print_text_diagnostics("active artist", &track.artist);
+                    print_text_diagnostics("active album", &track.album);
+                    println!(
+                        "[plex_menu] active track fields: rating_key={:?}, user_rating={:?}",
+                        track.rating_key, track.user_rating
+                    );
+                    for playlist in &playback.playlists {
+                        println!(
+                            "[plex_menu] playlist: name={:?}, rating_key={:?}, included={}, item_id={:?}",
+                            playlist.name,
+                            playlist.playlist_rating_key,
+                            playlist.included,
+                            playlist.playlist_item_id
+                        );
+                        print_text_diagnostics("playlist name", &playlist.name);
+                    }
+                } else {
+                    println!("[plex_menu] no active track");
+                }
+                previous_status = Some(playback.status.clone());
+                previous_track = playback.track.clone();
+            }
             *worker_state.lock().unwrap() = playback;
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -701,6 +808,7 @@ fn main() {
         .expect("failed to create the macOS menu bar item");
 
     let mut should_exit = false;
+    let mut last_menu_bar_title: Option<String> = None;
     event_loop.run(move |_event, _event_loop, control_flow| {
         while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             match menu_event.id().as_ref() {
@@ -881,7 +989,12 @@ fn main() {
             }
 
             status_item.set_text(format!("Status: {}", playback.status));
-            tray.set_title(Some(menu_bar_title(&playback)));
+            let menu_bar_title = menu_bar_title(&playback);
+            if last_menu_bar_title.as_deref() != Some(menu_bar_title.as_str()) {
+                print_text_diagnostics("menu bar title before set_title", &menu_bar_title);
+                last_menu_bar_title = Some(menu_bar_title.clone());
+            }
+            tray.set_title(Some(menu_bar_title));
             let tooltip = match &playback.track {
                 Some(track) => format!(
                     "Plex Menu — {} — {}",
@@ -1105,10 +1218,12 @@ export PLEX_EXTRA=value
 
     #[test]
     fn truncates_menu_bar_titles() {
-        assert_eq!(truncate_chars("A Song", 45), "A Song");
+        let measure = |value: &str| value.chars().count() as f64;
+
+        assert_eq!(truncate_by_width("A Song", 45.0, measure), "A Song");
         assert_eq!(
-            truncate_chars("A very long song title", 10),
-            "A very lon..."
+            truncate_by_width("A very long song title", 10.0, measure),
+            "A very ..."
         );
     }
 }
